@@ -123,3 +123,4 @@ msm_drm-$(CONFIG_DRM_MSM) += \
 obj-$(CONFIG_DRM_MSM)	+= msm_drm.o
 
 obj-$(CONFIG_DRM_FBDEV_EMULATION) += msm_fbdev.o
+CFLAGS_sde_crtc.o += -Wframe-larger-than=8192
