@@ -440,7 +440,6 @@ struct dma_buf {
 	void *vmap_ptr;
 	const char *exp_name;
 	char *buf_name;
-	struct timespec ctime;
 	const char *name;
 	spinlock_t name_lock;
 	struct module *owner;
