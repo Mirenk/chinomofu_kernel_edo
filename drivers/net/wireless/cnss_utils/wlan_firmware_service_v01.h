@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
-/* Copyright (c) 2015-2019, The Linux Foundation. All rights reserved. */
+/* Copyright (c) 2015-2020, The Linux Foundation. All rights reserved. */
 
 #ifndef WLAN_FIRMWARE_SERVICE_V01_H
 #define WLAN_FIRMWARE_SERVICE_V01_H
@@ -10,6 +10,7 @@
 #define WLFW_SERVICE_VERS_V01 0x01
 
 #define QMI_WLFW_WFC_CALL_STATUS_REQ_V01 0x0049
+#define QMI_WLFW_DEVICE_INFO_RESP_V01 0x004C
 #define QMI_WLFW_BDF_DOWNLOAD_REQ_V01 0x0025
 #define QMI_WLFW_FW_MEM_READY_IND_V01 0x0037
 #define QMI_WLFW_QDSS_TRACE_CONFIG_DOWNLOAD_REQ_V01 0x0044
@@ -73,6 +74,7 @@
 #define QMI_WLFW_SHUTDOWN_REQ_V01 0x0043
 #define QMI_WLFW_VBATT_REQ_V01 0x0032
 #define QMI_WLFW_ANTENNA_SWITCH_RESP_V01 0x0047
+#define QMI_WLFW_DEVICE_INFO_REQ_V01 0x004C
 #define QMI_WLFW_MAC_ADDR_REQ_V01 0x0033
 #define QMI_WLFW_RESPOND_MEM_RESP_V01 0x0036
 #define QMI_WLFW_VBATT_RESP_V01 0x0032
@@ -89,6 +91,7 @@
 #define QMI_WLFW_MAX_DATA_SIZE_V01 6144
 #define QMI_WLFW_FUNCTION_NAME_LEN_V01 128
 #define QMI_WLFW_MAX_NUM_CE_V01 12
+#define QMI_WLFW_MAX_HOST_DDR_RANGE_SIZE_V01 3
 #define QMI_WLFW_MAX_TIMESTAMP_LEN_V01 32
 #define QMI_WLFW_MAX_ATHDIAG_DATA_SIZE_V01 6144
 #define QMI_WLFW_MAX_WFC_CALL_STATUS_DATA_SIZE_V01 256
@@ -99,6 +102,7 @@
 #define QMI_WLFW_MAX_NUM_SHADOW_REG_V01 24
 #define QMI_WLFW_MAC_ADDR_SIZE_V01 6
 #define QMI_WLFW_MAX_NUM_SHADOW_REG_V2_V01 36
+#define QMI_WLFW_MAX_PLATFORM_NAME_LEN_V01 64
 #define QMI_WLFW_MAX_NUM_SVC_V01 24
 
 enum wlfw_driver_mode_enum_v01 {
@@ -242,6 +246,11 @@ struct wlfw_soc_info_s_v01 {
 struct wlfw_fw_version_info_s_v01 {
 	u32 fw_version;
 	char fw_build_timestamp[QMI_WLFW_MAX_TIMESTAMP_LEN_V01 + 1];
+};
+
+struct wlfw_host_ddr_range_s_v01 {
+	u64 start;
+	u64 size;
 };
 
 struct wlfw_ind_register_req_msg_v01 {
@@ -661,9 +670,14 @@ struct wlfw_host_cap_req_msg_v01 {
 	u8 mem_cfg_mode;
 	u8 cal_duration_valid;
 	u16 cal_duration;
+	u8 platform_name_valid;
+	char platform_name[QMI_WLFW_MAX_PLATFORM_NAME_LEN_V01 + 1];
+	u8 ddr_range_valid;
+	struct wlfw_host_ddr_range_s_v01
+		ddr_range[QMI_WLFW_MAX_HOST_DDR_RANGE_SIZE_V01];
 };
 
-#define WLFW_HOST_CAP_REQ_MSG_V01_MAX_MSG_LEN 194
+#define WLFW_HOST_CAP_REQ_MSG_V01_MAX_MSG_LEN 312
 extern struct qmi_elem_info wlfw_host_cap_req_msg_v01_ei[];
 
 struct wlfw_host_cap_resp_msg_v01 {
@@ -983,5 +997,23 @@ struct wlfw_respond_get_info_ind_msg_v01 {
 
 #define WLFW_RESPOND_GET_INFO_IND_MSG_V01_MAX_MSG_LEN 6164
 extern struct qmi_elem_info wlfw_respond_get_info_ind_msg_v01_ei[];
+
+struct wlfw_device_info_req_msg_v01 {
+	char placeholder;
+};
+
+#define WLFW_DEVICE_INFO_REQ_MSG_V01_MAX_MSG_LEN 0
+extern struct qmi_elem_info wlfw_device_info_req_msg_v01_ei[];
+
+struct wlfw_device_info_resp_msg_v01 {
+	struct qmi_response_type_v01 resp;
+	u8 bar_addr_valid;
+	u64 bar_addr;
+	u8 bar_size_valid;
+	u32 bar_size;
+};
+
+#define WLFW_DEVICE_INFO_RESP_MSG_V01_MAX_MSG_LEN 25
+extern struct qmi_elem_info wlfw_device_info_resp_msg_v01_ei[];
 
 #endif
