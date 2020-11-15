@@ -11203,6 +11203,9 @@ get_first_not_claimed_cpu(cpumask_t *cpumask)
 		if (!atomic_read(&per_cpu(claim_wake_up_cpu, ilb)))
 			break;
 	}
+	
+		return ilb;
+}
 
 static inline int find_energy_aware_new_ilb(void)
 {

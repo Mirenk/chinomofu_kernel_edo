@@ -358,17 +358,6 @@ void mhi_arch_mission_mode_enter(struct mhi_controller *mhi_cntrl)
 		pm_runtime_allow(&mhi_dev->pci_dev->dev);
 }
 
-void mhi_arch_mission_mode_enter(struct mhi_controller *mhi_cntrl)
-{
-	struct mhi_dev *mhi_dev = mhi_controller_get_devdata(mhi_cntrl);
-	struct arch_info *arch_info = mhi_dev->arch_info;
-	struct mhi_device *boot_dev = arch_info->boot_dev;
-
-	/* disable boot logger channel */
-	if (boot_dev)
-		mhi_unprepare_from_transfer(boot_dev);
-}
-
 static  int mhi_arch_pcie_scale_bw(struct mhi_controller *mhi_cntrl,
 				   struct pci_dev *pci_dev,
 				   struct mhi_link_info *link_info)
