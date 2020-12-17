@@ -225,6 +225,8 @@ static int wcd938x_init_reg(struct snd_soc_component *component)
 				WCD938X_MICB4_TEST_CTL_1, 0xE0, 0xE0);
 	snd_soc_component_update_bits(component,
 				WCD938X_TX_3_4_TEST_BLK_EN2, 0x01, 0x00);
+	snd_soc_component_update_bits(component,
+				WCD938X_HPH_SURGE_HPHLR_SURGE_EN, 0xFF, 0xD9);
 
 	return 0;
 }

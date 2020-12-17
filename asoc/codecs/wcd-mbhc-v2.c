@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-/* Copyright (c) 2015-2019, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2015-2020, The Linux Foundation. All rights reserved.
  */
 #include <linux/module.h>
 #include <linux/init.h>
@@ -553,6 +553,7 @@ void wcd_mbhc_report_plug(struct wcd_mbhc *mbhc, int insertion,
 	struct snd_soc_component *component = mbhc->component;
 	bool is_pa_on = false;
 	u8 fsm_en = 0;
+	bool skip_report = false;
 
 	WCD_MBHC_RSC_ASSERT_LOCKED(mbhc);
 
@@ -593,6 +594,7 @@ void wcd_mbhc_report_plug(struct wcd_mbhc *mbhc, int insertion,
 		}
 
 		mbhc->hph_type = WCD_MBHC_HPH_NONE;
+		mbhc->extn_cable_inserted = false;
 		mbhc->zl = mbhc->zr = 0;
 		pr_debug("%s: Reporting removal %d(%x)\n", __func__,
 			 jack_type, mbhc->hph_status);
@@ -671,6 +673,8 @@ void wcd_mbhc_report_plug(struct wcd_mbhc *mbhc, int insertion,
 			mbhc->jiffies_atreport = jiffies;
 		} else if (jack_type == SND_JACK_LINEOUT) {
 			mbhc->current_plug = MBHC_PLUG_TYPE_HIGH_HPH;
+			skip_report = true;
+			pr_debug("%s: extension cable detected\n", __func__);
 		} else if (jack_type == SND_JACK_ANC_HEADPHONE)
 			mbhc->current_plug = MBHC_PLUG_TYPE_ANC_HEADPHONE;
 
@@ -732,11 +736,20 @@ void wcd_mbhc_report_plug(struct wcd_mbhc *mbhc, int insertion,
 
 		mbhc->hph_status |= jack_type;
 
-		pr_debug("%s: Reporting insertion %d(%x)\n", __func__,
-			 jack_type, mbhc->hph_status);
-		wcd_mbhc_jack_report(mbhc, &mbhc->headset_jack,
-				    (mbhc->hph_status | SND_JACK_MECHANICAL),
-				    WCD_MBHC_JACK_MASK);
+		if (jack_type == SND_JACK_HEADPHONE &&
+		    mbhc->mbhc_cb->mbhc_micb_ramp_control)
+			mbhc->mbhc_cb->mbhc_micb_ramp_control(component, false);
+
+		if (!skip_report) {
+			pr_debug("%s: Reporting insertion %d(%x)\n", __func__,
+				 jack_type, mbhc->hph_status);
+			wcd_mbhc_jack_report(mbhc, &mbhc->headset_jack,
+					    (mbhc->hph_status |
+						SND_JACK_MECHANICAL),
+					    WCD_MBHC_JACK_MASK);
+		} else {
+			pr_debug("%s: Skip reporting insertion\n", __func__);
+		}
 		wcd_mbhc_clr_and_turnon_hph_padac(mbhc);
 	}
 	pr_debug("%s: leave hph_status %x\n", __func__, mbhc->hph_status);
@@ -921,6 +934,10 @@ static void wcd_mbhc_swch_irq_handler(struct wcd_mbhc *mbhc)
 						&mbhc->correct_plug_swch);
 	else
 		pr_info("%s: hs_detect_plug work not cancelled\n", __func__);
+
+	/* Enable micbias ramp */
+	if (mbhc->mbhc_cb->mbhc_micb_ramp_control)
+		mbhc->mbhc_cb->mbhc_micb_ramp_control(component, true);
 
 	if (mbhc->mbhc_cb->micbias_enable_status)
 		micbias1 = mbhc->mbhc_cb->micbias_enable_status(mbhc,
@@ -1417,9 +1434,6 @@ static int wcd_mbhc_initialise(struct wcd_mbhc *mbhc)
 	/* Button Debounce set to 16ms */
 	WCD_MBHC_REG_UPDATE_BITS(WCD_MBHC_BTN_DBNC, 2);
 
-	/* Enable micbias ramp */
-	if (mbhc->mbhc_cb->mbhc_micb_ramp_control)
-		mbhc->mbhc_cb->mbhc_micb_ramp_control(component, true);
 	/* enable bias */
 	mbhc->mbhc_cb->mbhc_bias(component, true);
 	/* enable MBHC clock */
@@ -1791,6 +1805,7 @@ int wcd_mbhc_init(struct wcd_mbhc *mbhc, struct snd_soc_component *component,
 	mbhc->is_hs_recording = false;
 	mbhc->is_extn_cable = false;
 	mbhc->extn_cable_hph_rem = false;
+	mbhc->extn_cable_inserted = false;
 	mbhc->hph_type = WCD_MBHC_HPH_NONE;
 	mbhc->wcd_mbhc_regs = wcd_mbhc_regs;
 	mbhc->swap_thr = GND_MIC_SWAP_THRESHOLD;
