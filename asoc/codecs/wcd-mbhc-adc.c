@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-/* Copyright (c) 2017-2019, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2017-2020, The Linux Foundation. All rights reserved.
  */
 #include <linux/module.h>
 #include <linux/init.h>
@@ -1123,6 +1123,7 @@ static irqreturn_t wcd_mbhc_adc_hs_ins_irq(int irq, void *data)
 	mbhc->is_extn_cable = true;
 	mbhc->extn_cable_inserted = true;
 	mbhc->btn_press_intr = false;
+	mbhc->force_linein = false;
 	wcd_mbhc_adc_detect_plug_type(mbhc);
 	WCD_MBHC_RSC_UNLOCK(mbhc);
 	pr_debug("%s: leave\n", __func__);

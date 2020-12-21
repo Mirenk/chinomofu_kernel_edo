@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-/* Copyright (c) 2018-2019, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2018-2020, The Linux Foundation. All rights reserved.
  */
 
 #include <linux/module.h>
@@ -444,8 +444,8 @@ static struct snd_soc_dai_driver wsa_macro_dai[] = {
 static const struct wsa_macro_reg_mask_val wsa_macro_spkr_default[] = {
 	{BOLERO_CDC_WSA_COMPANDER0_CTL3, 0x80, 0x80},
 	{BOLERO_CDC_WSA_COMPANDER1_CTL3, 0x80, 0x80},
-	{BOLERO_CDC_WSA_COMPANDER0_CTL7, 0x01, 0x01},
-	{BOLERO_CDC_WSA_COMPANDER1_CTL7, 0x01, 0x01},
+	{BOLERO_CDC_WSA_COMPANDER0_CTL7, 0x1F, 0x19},
+	{BOLERO_CDC_WSA_COMPANDER1_CTL7, 0x1F, 0x19},
 	{BOLERO_CDC_WSA_BOOST0_BOOST_CTL, 0x7C, 0x58},
 	{BOLERO_CDC_WSA_BOOST1_BOOST_CTL, 0x7C, 0x58},
 };
@@ -453,8 +453,8 @@ static const struct wsa_macro_reg_mask_val wsa_macro_spkr_default[] = {
 static const struct wsa_macro_reg_mask_val wsa_macro_spkr_mode1[] = {
 	{BOLERO_CDC_WSA_COMPANDER0_CTL3, 0x80, 0x00},
 	{BOLERO_CDC_WSA_COMPANDER1_CTL3, 0x80, 0x00},
-	{BOLERO_CDC_WSA_COMPANDER0_CTL7, 0x01, 0x00},
-	{BOLERO_CDC_WSA_COMPANDER1_CTL7, 0x01, 0x00},
+	{BOLERO_CDC_WSA_COMPANDER0_CTL7, 0x1F, 0x18},
+	{BOLERO_CDC_WSA_COMPANDER1_CTL7, 0x1F, 0x18},
 	{BOLERO_CDC_WSA_BOOST0_BOOST_CTL, 0x7C, 0x44},
 	{BOLERO_CDC_WSA_BOOST1_BOOST_CTL, 0x7C, 0x44},
 };
@@ -996,9 +996,6 @@ static int wsa_macro_event_handler(struct snd_soc_component *component,
 	case BOLERO_MACRO_EVT_SSR_DOWN:
 		trace_printk("%s, enter SSR down\n", __func__);
 		if (wsa_priv->swr_ctrl_data) {
-			swrm_wcd_notify(
-				wsa_priv->swr_ctrl_data[0].wsa_swr_pdev,
-				SWR_DEVICE_DOWN, NULL);
 			swrm_wcd_notify(
 				wsa_priv->swr_ctrl_data[0].wsa_swr_pdev,
 				SWR_DEVICE_SSR_DOWN, NULL);
@@ -2717,10 +2714,10 @@ static const struct snd_soc_dapm_route wsa_audio_map[] = {
 static const struct wsa_macro_reg_mask_val wsa_macro_reg_init[] = {
 	{BOLERO_CDC_WSA_BOOST0_BOOST_CFG1, 0x3F, 0x12},
 	{BOLERO_CDC_WSA_BOOST0_BOOST_CFG2, 0x1C, 0x08},
-	{BOLERO_CDC_WSA_COMPANDER0_CTL7, 0x1E, 0x18},
+	{BOLERO_CDC_WSA_COMPANDER0_CTL7, 0x1E, 0x0C},
 	{BOLERO_CDC_WSA_BOOST1_BOOST_CFG1, 0x3F, 0x12},
 	{BOLERO_CDC_WSA_BOOST1_BOOST_CFG2, 0x1C, 0x08},
-	{BOLERO_CDC_WSA_COMPANDER1_CTL7, 0x1E, 0x18},
+	{BOLERO_CDC_WSA_COMPANDER1_CTL7, 0x1E, 0x0C},
 	{BOLERO_CDC_WSA_BOOST0_BOOST_CTL, 0x70, 0x58},
 	{BOLERO_CDC_WSA_BOOST1_BOOST_CTL, 0x70, 0x58},
 	{BOLERO_CDC_WSA_RX0_RX_PATH_CFG1, 0x08, 0x08},
@@ -2731,8 +2728,6 @@ static const struct wsa_macro_reg_mask_val wsa_macro_reg_init[] = {
 	{BOLERO_CDC_WSA_TX1_SPKR_PROT_PATH_CFG0, 0x01, 0x01},
 	{BOLERO_CDC_WSA_TX2_SPKR_PROT_PATH_CFG0, 0x01, 0x01},
 	{BOLERO_CDC_WSA_TX3_SPKR_PROT_PATH_CFG0, 0x01, 0x01},
-	{BOLERO_CDC_WSA_COMPANDER0_CTL3, 0x80, 0x80},
-	{BOLERO_CDC_WSA_COMPANDER1_CTL3, 0x80, 0x80},
 	{BOLERO_CDC_WSA_COMPANDER0_CTL7, 0x01, 0x01},
 	{BOLERO_CDC_WSA_COMPANDER1_CTL7, 0x01, 0x01},
 	{BOLERO_CDC_WSA_RX0_RX_PATH_CFG0, 0x01, 0x01},
@@ -3247,6 +3242,10 @@ static const struct of_device_id wsa_macro_dt_match[] = {
 };
 
 static const struct dev_pm_ops bolero_dev_pm_ops = {
+	SET_SYSTEM_SLEEP_PM_OPS(
+		pm_runtime_force_suspend,
+		pm_runtime_force_resume
+	)
 	SET_RUNTIME_PM_OPS(
 		bolero_runtime_suspend,
 		bolero_runtime_resume,
