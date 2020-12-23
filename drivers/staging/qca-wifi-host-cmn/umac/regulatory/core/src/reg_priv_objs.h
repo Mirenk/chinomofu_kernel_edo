@@ -88,9 +88,6 @@ struct chan_change_cbk_entry {
  *	country update is pending for pdev (phy_id).
  * @world_country_pending: In this array, element[phy_id] is true if any world
  *	country update is pending for pdev (phy_id).
- * @def_pdev_id: Default pdev id, used in case of MCL
- * @ignore_fw_reg_offload_ind: Ignore FW reg offload indication
- * @six_ghz_supported: whether 6ghz is supported
  */
 struct wlan_regulatory_psoc_priv_obj {
 	struct mas_chan_params mas_chan_params[PSOC_MAX_PHY_REG_CAP];
@@ -138,10 +135,13 @@ struct wlan_regulatory_psoc_priv_obj {
 	bool force_ssc_disable_indoor_channel;
 	bool enable_srd_chan_in_master_mode;
 	bool enable_11d_in_world_mode;
-	int8_t def_pdev_id;
 	qdf_spinlock_t cbk_list_lock;
 };
 
+/**
+ * struct wlan_regulatory_pdev_priv_obj - wlan regulatory pdev private object
+ * @pdev_opened: whether pdev has been opened by application
+ */
 struct wlan_regulatory_pdev_priv_obj {
 	struct regulatory_channel cur_chan_list[NUM_CHANNELS];
 	struct regulatory_channel mas_chan_list[NUM_CHANNELS];
@@ -174,6 +174,7 @@ struct wlan_regulatory_pdev_priv_obj {
 	bool sap_state;
 	struct reg_rule_info reg_rules;
 	qdf_spinlock_t reg_rules_lock;
+	bool pdev_opened;
 };
 
 /**

@@ -141,26 +141,25 @@ static inline void hal_unlock_reg_access(struct hal_soc *soc,
 #else
 static inline int hal_force_wake_request(struct hal_soc *soc)
 {
-	uint32_t timeout = 0;
 	int ret;
 
-	ret = pld_force_wake_request(soc->qdf_dev->dev);
+	ret = pld_force_wake_request_sync(soc->qdf_dev->dev,
+					  FORCE_WAKE_DELAY_TIMEOUT * 1000);
 	if (ret) {
 		QDF_TRACE(QDF_MODULE_ID_DP, QDF_TRACE_LEVEL_ERROR,
 			  "%s: Request send failed %d\n", __func__, ret);
 		return -EINVAL;
 	}
 
-	while (!pld_is_device_awake(soc->qdf_dev->dev) &&
-	       timeout <= FORCE_WAKE_DELAY_TIMEOUT) {
-		mdelay(FORCE_WAKE_DELAY_MS);
-		timeout += FORCE_WAKE_DELAY_MS;
-	}
+	/* If device's M1 state-change event races here, it can be ignored,
+	 * as the device is expected to immediately move from M2 to M0
+	 * without entering low power state.
+	 */
+	if (!pld_is_device_awake(soc->qdf_dev->dev))
+		QDF_TRACE(QDF_MODULE_ID_DP, QDF_TRACE_LEVEL_INFO_LOW,
+			  "%s: state-change event races, ignore\n", __func__);
 
-	if (pld_is_device_awake(soc->qdf_dev->dev) == true)
-		return 0;
-	else
-		return -ETIMEDOUT;
+	return 0;
 }
 
 static inline int hal_force_wake_release(struct hal_soc *soc)
@@ -182,15 +181,6 @@ static inline void hal_unlock_reg_access(struct hal_soc *soc,
 #endif
 
 #ifdef PCIE_REG_WINDOW_LOCAL_NO_CACHE
-static inline void hal_select_window(struct hal_soc *hal_soc, uint32_t offset)
-{
-	uint32_t window = (offset >> WINDOW_SHIFT) & WINDOW_VALUE_MASK;
-
-	qdf_iowrite32(hal_soc->dev_base_addr + WINDOW_REG_ADDRESS,
-		      WINDOW_ENABLE_BIT | window);
-	hal_soc->register_window = window;
-}
-
 /**
  * hal_select_window_confirm() - write window register and
 				 check writing result
@@ -209,17 +199,6 @@ static inline void hal_select_window_confirm(struct hal_soc *hal_soc,
 				   WINDOW_ENABLE_BIT | window);
 }
 #else
-static inline void hal_select_window(struct hal_soc *hal_soc, uint32_t offset)
-{
-	uint32_t window = (offset >> WINDOW_SHIFT) & WINDOW_VALUE_MASK;
-
-	if (window != hal_soc->register_window) {
-		qdf_iowrite32(hal_soc->dev_base_addr + WINDOW_REG_ADDRESS,
-			      WINDOW_ENABLE_BIT | window);
-		hal_soc->register_window = window;
-	}
-}
-
 static inline void hal_select_window_confirm(struct hal_soc *hal_soc,
 					     uint32_t offset)
 {
@@ -255,7 +234,7 @@ static inline void hal_write32_mb(struct hal_soc *hal_soc, uint32_t offset,
 		qdf_iowrite32(hal_soc->dev_base_addr + offset, value);
 	} else {
 		hal_lock_reg_access(hal_soc, &flags);
-		hal_select_window(hal_soc, offset);
+		hal_select_window_confirm(hal_soc, offset);
 		qdf_iowrite32(hal_soc->dev_base_addr + WINDOW_START +
 			  (offset & WINDOW_RANGE_MASK), value);
 
@@ -288,7 +267,7 @@ static inline void hal_write32_mb(struct hal_soc *hal_soc, uint32_t offset,
 		qdf_iowrite32(hal_soc->dev_base_addr + offset, value);
 	} else {
 		hal_lock_reg_access(hal_soc, &flags);
-		hal_select_window(hal_soc, offset);
+		hal_select_window_confirm(hal_soc, offset);
 		qdf_iowrite32(hal_soc->dev_base_addr + WINDOW_START +
 			  (offset & WINDOW_RANGE_MASK), value);
 
@@ -421,7 +400,7 @@ static inline uint32_t hal_read32_mb(struct hal_soc *hal_soc, uint32_t offset)
 	}
 
 	hal_lock_reg_access(hal_soc, &flags);
-	hal_select_window(hal_soc, offset);
+	hal_select_window_confirm(hal_soc, offset);
 	ret = qdf_ioread32(hal_soc->dev_base_addr + WINDOW_START +
 		       (offset & WINDOW_RANGE_MASK));
 	hal_unlock_reg_access(hal_soc, &flags);
@@ -468,7 +447,7 @@ static inline uint32_t hal_read32_mb(struct hal_soc *hal_soc, uint32_t offset)
 	}
 
 	hal_lock_reg_access(hal_soc, &flags);
-	hal_select_window(hal_soc, offset);
+	hal_select_window_confirm(hal_soc, offset);
 	ret = qdf_ioread32(hal_soc->dev_base_addr + WINDOW_START +
 		       (offset & WINDOW_RANGE_MASK));
 	hal_unlock_reg_access(hal_soc, &flags);
@@ -497,6 +476,16 @@ void hal_dump_reg_write_srng_stats(struct hal_soc *hal_soc_hdl);
  * Return: none
  */
 void hal_dump_reg_write_stats(struct hal_soc *hal_soc_hdl);
+
+/**
+ * hal_get_reg_write_pending_work() - get the number of entries
+ *		pending in the workqueue to be processed.
+ * @hal_soc: HAL soc handle
+ *
+ * Returns: the number of entries pending to be processed
+ */
+int hal_get_reg_write_pending_work(void *hal_soc);
+
 #else
 static inline void hal_dump_reg_write_srng_stats(struct hal_soc *hal_soc_hdl)
 {
@@ -504,6 +493,11 @@ static inline void hal_dump_reg_write_srng_stats(struct hal_soc *hal_soc_hdl)
 
 static inline void hal_dump_reg_write_stats(struct hal_soc *hal_soc_hdl)
 {
+}
+
+static inline int hal_get_reg_write_pending_work(void *hal_soc)
+{
+	return 0;
 }
 #endif
 

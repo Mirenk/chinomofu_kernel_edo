@@ -2107,6 +2107,41 @@ bool qdf_dp_proto_log_enable_check(enum qdf_proto_type pkt_type,
 	}
 }
 
+void qdf_dp_track_noack_check(qdf_nbuf_t nbuf, enum qdf_proto_subtype *subtype)
+{
+	enum qdf_proto_type pkt_type = qdf_dp_get_pkt_proto_type(nbuf);
+	uint16_t dp_track = 0;
+
+	switch (pkt_type) {
+	case QDF_PROTO_TYPE_EAPOL:
+		dp_track = qdf_dp_get_proto_bitmap() &
+				QDF_NBUF_PKT_TRAC_TYPE_EAPOL;
+		break;
+	case QDF_PROTO_TYPE_DHCP:
+		dp_track = qdf_dp_get_proto_bitmap() &
+				QDF_NBUF_PKT_TRAC_TYPE_DHCP;
+		break;
+	case QDF_PROTO_TYPE_ARP:
+		dp_track = qdf_dp_get_proto_bitmap() &
+					QDF_NBUF_PKT_TRAC_TYPE_ARP;
+		break;
+	case QDF_PROTO_TYPE_DNS:
+		dp_track = qdf_dp_get_proto_bitmap() &
+					QDF_NBUF_PKT_TRAC_TYPE_DNS;
+		break;
+	default:
+		break;
+	}
+
+	if (!dp_track) {
+		*subtype = QDF_PROTO_INVALID;
+		return;
+	}
+
+	*subtype = qdf_dp_get_pkt_subtype(nbuf, pkt_type);
+}
+qdf_export_symbol(qdf_dp_track_noack_check);
+
 /**
  * qdf_dp_trace_ptr() - record dptrace
  * @code: dptrace code
@@ -2660,26 +2695,27 @@ QDF_STATUS qdf_dpt_dump_stats_debugfs(qdf_debugfs_file_t file,
 			break;
 
 		case QDF_DP_TRACE_HDD_TX_TIMEOUT:
-			qdf_debugfs_printf(file, "DPT: %04d: %s %s\n",
-				i, p_record.time,
-				qdf_dp_code_to_string(p_record.code));
-			qdf_debugfs_printf(file, "%s: HDD TX Timeout\n");
+			qdf_debugfs_printf(
+					file, "DPT: %04d: %llu %s\n",
+					i, p_record.time,
+					qdf_dp_code_to_string(p_record.code));
+			qdf_debugfs_printf(file, "HDD TX Timeout\n");
 			break;
 
 		case QDF_DP_TRACE_HDD_SOFTAP_TX_TIMEOUT:
-			qdf_debugfs_printf(file, "%04d: %s %s\n",
-				i, p_record.time,
-				qdf_dp_code_to_string(p_record.code));
-			qdf_debugfs_printf(file,
-					   "%s: HDD  SoftAP TX Timeout\n");
+			qdf_debugfs_printf(
+					file, "DPT: %04d: %llu %s\n",
+					i, p_record.time,
+					qdf_dp_code_to_string(p_record.code));
+			qdf_debugfs_printf(file, "HDD SoftAP TX Timeout\n");
 			break;
 
 		case QDF_DP_TRACE_CE_FAST_PACKET_ERR_RECORD:
-			qdf_debugfs_printf(file, "DPT: %04d: %s %s\n",
-				i, p_record.time,
-				qdf_dp_code_to_string(p_record.code));
-			qdf_debugfs_printf(file,
-					   "%s: CE Fast Packet Error\n");
+			qdf_debugfs_printf(
+					file, "DPT: %04d: %llu %s\n",
+					i, p_record.time,
+					qdf_dp_code_to_string(p_record.code));
+			qdf_debugfs_printf(file, "CE Fast Packet Error\n");
 			break;
 
 		case QDF_DP_TRACE_MAX:

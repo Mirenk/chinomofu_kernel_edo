@@ -89,6 +89,31 @@ dp_peer_find_by_id(struct dp_soc *soc,
 }
 #endif /* PEER_LOCK_REF_PROTECT */
 
+#ifdef PEER_CACHE_RX_PKTS
+/**
+ * dp_rx_flush_rx_cached() - flush cached rx frames
+ * @peer: peer
+ * @drop: set flag to drop frames
+ *
+ * Return: None
+ */
+void dp_rx_flush_rx_cached(struct dp_peer *peer, bool drop);
+#else
+static inline void dp_rx_flush_rx_cached(struct dp_peer *peer, bool drop)
+{
+}
+#endif
+
+static inline void
+dp_clear_peer_internal(struct dp_soc *soc, struct dp_peer *peer)
+{
+	qdf_spin_lock_bh(&peer->peer_info_lock);
+	peer->state = OL_TXRX_PEER_STATE_DISC;
+	qdf_spin_unlock_bh(&peer->peer_info_lock);
+
+	dp_rx_flush_rx_cached(peer, true);
+}
+
 void dp_print_ast_stats(struct dp_soc *soc);
 void dp_rx_peer_map_handler(void *soc_handle, uint16_t peer_id,
 			    uint16_t hw_peer_id, uint8_t vdev_id,
@@ -151,41 +176,6 @@ void dp_peer_free_hmwds_cb(void *ctrl_psoc,
 
 void dp_peer_ast_hash_remove(struct dp_soc *soc,
 			     struct dp_ast_entry *ase);
-
-/*
- * dp_get_vdev_from_soc_vdev_id_wifi3() -
- * Returns vdev object given the vdev id
- * vdev id is unique across pdev's
- *
- * @soc         : core DP soc context
- * @vdev_id     : vdev id from vdev object can be retrieved
- *
- * Return: struct dp_vdev*: Pointer to DP vdev object
- */
-static inline struct dp_vdev *
-dp_get_vdev_from_soc_vdev_id_wifi3(struct dp_soc *soc,
-					uint8_t vdev_id)
-{
-	struct dp_pdev *pdev = NULL;
-	struct dp_vdev *vdev = NULL;
-	int i;
-
-	for (i = 0; i < MAX_PDEV_CNT && soc->pdev_list[i]; i++) {
-		pdev = soc->pdev_list[i];
-		qdf_spin_lock_bh(&pdev->vdev_list_lock);
-		TAILQ_FOREACH(vdev, &pdev->vdev_list, vdev_list_elem) {
-			if (vdev->vdev_id == vdev_id) {
-				qdf_spin_unlock_bh(&pdev->vdev_list_lock);
-				return vdev;
-			}
-		}
-		qdf_spin_unlock_bh(&pdev->vdev_list_lock);
-	}
-	dp_err("Failed to find vdev for vdev_id %d", vdev_id);
-
-	return NULL;
-
-}
 
 /*
  * dp_peer_find_by_id_exist - check if peer exists for given id

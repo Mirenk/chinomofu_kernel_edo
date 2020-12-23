@@ -809,8 +809,10 @@ struct cdp_host_stats_ops {
 	void
 		(*txrx_update_pdev_stats)(struct cdp_pdev *pdev, void *data,
 					  uint16_t stats_id);
-	struct cdp_peer_stats*
-		(*txrx_get_peer_stats)(struct cdp_peer *peer);
+	QDF_STATUS
+		(*txrx_get_peer_stats)(struct cdp_soc_t *soc, uint8_t vdev_id,
+				       uint8_t *peer_mac,
+				       struct cdp_peer_stats *peer_stats);
 	void
 		(*txrx_reset_peer_ald_stats)(struct cdp_peer *peer);
 	void
@@ -1250,12 +1252,15 @@ struct cdp_ipa_ops {
  * @bus_suspend:
  * @bus_resume:
  * @process_wow_ack_rsp: handler for wow ack response
+ * @process_target_suspend_req: handler for target suspend request
  */
 struct cdp_bus_ops {
 	QDF_STATUS (*bus_suspend)(struct cdp_pdev *opaque_pdev);
 	QDF_STATUS (*bus_resume)(struct cdp_pdev *opaque_pdev);
 	void (*process_wow_ack_rsp)(struct cdp_soc_t *soc_hdl,
 				    struct cdp_pdev *opaque_pdev);
+	void (*process_target_suspend_req)(struct cdp_soc_t *soc_hdl,
+					   struct cdp_pdev *opaque_pdev);
 };
 
 /**

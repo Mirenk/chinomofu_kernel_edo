@@ -34,6 +34,12 @@
 #include <wlan_cp_stats_utils_api.h>
 #include <wlan_cp_stats_mc_tgt_api.h>
 #include "../../../umac/cmn_services/utils/inc/wlan_utility.h"
+#include <cdp_txrx_cmn_struct.h>
+#include <cdp_txrx_ops.h>
+#include <cdp_txrx_stats_struct.h>
+#include <cdp_txrx_peer_ops.h>
+#include <cdp_txrx_host_stats.h>
+#include <cds_api.h>
 
 static void target_if_cp_stats_free_stats_event(struct stats_event *ev)
 {
@@ -98,6 +104,8 @@ static void target_if_cp_stats_extract_peer_extd_stats(
 	QDF_STATUS status;
 	uint32_t i;
 	wmi_host_peer_extd_stats peer_extd_stats;
+	void *soc = cds_get_context(QDF_MODULE_ID_SOC);
+	struct cdp_peer_stats *peer_stats;
 
 	if (!stats_param->num_peer_extd_stats)
 		return;
@@ -122,6 +130,21 @@ static void target_if_cp_stats_extract_peer_extd_stats(
 			ev->peer_extended_stats[i].peer_macaddr);
 		ev->peer_extended_stats[i].rx_mc_bc_cnt =
 						peer_extd_stats.rx_mc_bc_cnt;
+
+		peer_stats = qdf_mem_malloc(sizeof(*peer_stats));
+		if (!peer_stats)
+			continue;
+
+		status = cdp_host_get_peer_stats(soc, CDP_INVALID_VDEV_ID,
+					ev->peer_extended_stats[i].peer_macaddr,
+					peer_stats);
+
+		if (QDF_IS_STATUS_SUCCESS(status))
+			ev->peer_extended_stats[i].rx_mc_bc_cnt =
+				peer_stats->rx.multicast.num +
+				peer_stats->rx.bcast.num;
+
+		qdf_mem_free(peer_stats);
 	}
 }
 

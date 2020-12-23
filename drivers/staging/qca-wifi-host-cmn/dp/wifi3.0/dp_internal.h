@@ -93,6 +93,23 @@ extern uint8_t
 dp_cpu_ring_map[DP_NSS_CPU_RING_MAP_MAX][WLAN_CFG_INT_NUM_CONTEXTS];
 #endif
 
+#define DP_MAX_TIMER_EXEC_TIME_TICKS \
+		(QDF_LOG_TIMESTAMP_CYCLES_PER_10_US * 100 * 20)
+
+/**
+ * enum timer_yield_status - yield status code used in monitor mode timer.
+ * @DP_TIMER_NO_YIELD: do not yield
+ * @DP_TIMER_WORK_DONE: yield because work is done
+ * @DP_TIMER_WORK_EXHAUST: yield because work quota is exhausted
+ * @DP_TIMER_TIME_EXHAUST: yield due to time slot exhausted
+ */
+enum timer_yield_status {
+	DP_TIMER_NO_YIELD,
+	DP_TIMER_WORK_DONE,
+	DP_TIMER_WORK_EXHAUST,
+	DP_TIMER_TIME_EXHAUST,
+};
+
 #if DP_PRINT_ENABLE
 #include <stdarg.h>       /* va_list */
 #include <qdf_types.h> /* qdf_vprint */
@@ -114,7 +131,6 @@ enum {
 	/* INFO2 - include non-fundamental but infrequent events */
 	DP_PRINT_LEVEL_INFO2,
 };
-
 
 #define dp_print(level, fmt, ...) do { \
 	if (level <= g_txrx_print_level) \
@@ -1343,5 +1359,40 @@ QDF_STATUS dp_tx_add_to_comp_queue(struct dp_soc *soc,
  */
 QDF_STATUS dp_rx_tid_update_wifi3(struct dp_peer *peer, int tid, uint32_t
 					 ba_window_size, uint32_t start_seq);
+
+/*
+ * dp_get_vdev_from_soc_vdev_id_wifi3() -
+ * Returns vdev object given the vdev id
+ * vdev id is unique across pdev's
+ *
+ * @soc         : core DP soc context
+ * @vdev_id     : vdev id from vdev object can be retrieved
+ *
+ * Return: struct dp_vdev*: Pointer to DP vdev object
+ */
+static inline struct dp_vdev *
+dp_get_vdev_from_soc_vdev_id_wifi3(struct dp_soc *soc,
+					uint8_t vdev_id)
+{
+	struct dp_pdev *pdev = NULL;
+	struct dp_vdev *vdev = NULL;
+	int i;
+
+	for (i = 0; i < MAX_PDEV_CNT && soc->pdev_list[i]; i++) {
+		pdev = soc->pdev_list[i];
+		qdf_spin_lock_bh(&pdev->vdev_list_lock);
+		TAILQ_FOREACH(vdev, &pdev->vdev_list, vdev_list_elem) {
+			if (vdev->vdev_id == vdev_id) {
+				qdf_spin_unlock_bh(&pdev->vdev_list_lock);
+				return vdev;
+			}
+		}
+		qdf_spin_unlock_bh(&pdev->vdev_list_lock);
+	}
+	dp_err("Failed to find vdev for vdev_id %d", vdev_id);
+
+	return NULL;
+
+}
 
 #endif /* #ifndef _DP_INTERNAL_H_ */

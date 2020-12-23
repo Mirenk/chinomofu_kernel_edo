@@ -557,6 +557,9 @@ struct dp_rx_tid {
 	uint32_t curr_seq_num;
 	uint32_t curr_frag_num;
 
+	/* head PN number */
+	uint64_t pn128[2];
+
 	uint32_t defrag_timeout_ms;
 	uint16_t dialogtoken;
 	uint16_t statuscode;
@@ -780,6 +783,12 @@ struct dp_soc_stats {
 			uint32_t reo_err_oor_drop;
 			/* REO OOR msdu indicated to stack count */
 			uint32_t reo_err_oor_to_stack;
+			/* REO OOR scattered msdu count */
+			uint32_t reo_err_oor_sg_count;
+			/* RX msdu rejected count on delivery to vdev stack_fn*/
+			uint32_t rejected;
+			/* Stale link desc cookie count*/
+			uint32_t invalid_link_cookie;
 		} err;
 
 		/* packet count per core - per ring */
