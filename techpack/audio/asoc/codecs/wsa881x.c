@@ -28,6 +28,7 @@
 #include <asoc/msm-cdc-pinctrl.h>
 #include "wsa881x.h"
 #include "wsa881x-temp-sensor.h"
+#include "asoc/bolero-slave-internal.h"
 
 #define DRV_NAME "wsa-codec"
 #define WSA881X_NUM_RETRY	5
@@ -109,15 +110,6 @@ struct wsa881x_priv {
 	int (*register_notifier)(void *handle,
 				 struct notifier_block *nblock,
 				 bool enable);
-};
-
-/* from bolero to WSA events */
-enum {
-	BOLERO_WSA_EVT_TX_CH_HOLD_CLEAR = 1,
-	BOLERO_WSA_EVT_PA_OFF_PRE_SSR,
-	BOLERO_WSA_EVT_SSR_DOWN,
-	BOLERO_WSA_EVT_SSR_UP,
-	BOLERO_WSA_EVT_PA_ON_POST_FSCLK,
 };
 
 struct wsa_ctrl_platform_data {
@@ -1076,6 +1068,9 @@ static int wsa881x_spkr_pa_event(struct snd_soc_dapm_widget *w,
 					      0x80, 0x00);
 		if (wsa881x->visense_enable) {
 			wsa881x_visense_adc_ctrl(component, DISABLE);
+			snd_soc_component_update_bits(component,
+						WSA881X_ADC_EN_SEL_IBAIS,
+						0x07, 0x00);
 			wsa881x_visense_txfe_ctrl(component, DISABLE,
 						0x00, 0x01, 0x01);
 		}
@@ -1384,7 +1379,7 @@ static int wsa881x_event_notify(struct notifier_block *nb,
 		return -EINVAL;
 
 	switch (event) {
-	case BOLERO_WSA_EVT_PA_OFF_PRE_SSR:
+	case BOLERO_SLV_EVT_PA_OFF_PRE_SSR:
 		snd_soc_component_update_bits(wsa881x->component,
 					      WSA881X_SPKR_DRV_GAIN,
 					      0xF0, 0xC0);
@@ -1392,7 +1387,8 @@ static int wsa881x_event_notify(struct notifier_block *nb,
 					      WSA881X_SPKR_DRV_EN,
 					      0x80, 0x00);
 		break;
-	case BOLERO_WSA_EVT_PA_ON_POST_FSCLK:
+	case BOLERO_SLV_EVT_PA_ON_POST_FSCLK:
+	case BOLERO_SLV_EVT_PA_ON_POST_FSCLK_ADIE_LB:
 		if ((snd_soc_component_read32(wsa881x->component,
 				WSA881X_SPKR_DAC_CTL) & 0x80) == 0x80)
 			snd_soc_component_update_bits(wsa881x->component,
@@ -1607,8 +1603,6 @@ static int wsa881x_swr_down(struct swr_device *pdev)
 	else
 		wsa881x->state = WSA881X_DEV_DOWN;
 
-	if (delayed_work_pending(&wsa881x->ocp_ctl_work))
-		cancel_delayed_work_sync(&wsa881x->ocp_ctl_work);
 	return ret;
 }
 

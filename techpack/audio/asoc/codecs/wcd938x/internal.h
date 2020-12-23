@@ -71,6 +71,7 @@ struct wcd938x_priv {
 	bool comp2_enable;
 	bool ldoh;
 	bool bcs_dis;
+	bool dapm_bias_off;
 	struct irq_domain *virq;
 	struct wcd_irq_info irq_info;
 	u32 rx_clk_cnt;
@@ -136,22 +137,6 @@ enum {
 	WCD_RX1,
 	WCD_RX2,
 	WCD_RX3
-};
-
-enum {
-	BOLERO_WCD_EVT_TX_CH_HOLD_CLEAR = 1,
-	BOLERO_WCD_EVT_PA_OFF_PRE_SSR,
-	BOLERO_WCD_EVT_SSR_DOWN,
-	BOLERO_WCD_EVT_SSR_UP,
-	BOLERO_WCD_EVT_CLK_NOTIFY,
-};
-
-enum {
-	WCD_BOLERO_EVT_RX_MUTE = 1,	/* for RX mute/unmute */
-	WCD_BOLERO_EVT_IMPED_TRUE,	/* for imped true */
-	WCD_BOLERO_EVT_IMPED_FALSE,	/* for imped false */
-	WCD_BOLERO_EVT_RX_COMPANDER_SOFT_RST,
-	WCD_BOLERO_EVT_BCS_CLK_OFF,
 };
 
 enum {

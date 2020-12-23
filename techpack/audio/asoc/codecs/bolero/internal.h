@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
-/* Copyright (c) 2018-2019, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2018-2020, The Linux Foundation. All rights reserved.
  */
 
 #ifndef _BOLERO_INTERNAL_H
@@ -9,29 +9,11 @@
 
 #define BOLERO_CDC_CHILD_DEVICES_MAX 6
 
-/* from bolero to WCD events */
-enum {
-	BOLERO_WCD_EVT_TX_CH_HOLD_CLEAR = 1,
-	BOLERO_WCD_EVT_PA_OFF_PRE_SSR,
-	BOLERO_WCD_EVT_SSR_DOWN,
-	BOLERO_WCD_EVT_SSR_UP,
-	BOLERO_WCD_EVT_PA_ON_POST_FSCLK,
-};
-
 enum {
 	REG_NO_ACCESS,
 	RD_REG,
 	WR_REG,
 	RD_WR_REG
-};
-
-/* from WCD to bolero events */
-enum {
-	WCD_BOLERO_EVT_RX_MUTE = 1, /* for RX mute/unmute */
-	WCD_BOLERO_EVT_IMPED_TRUE,   /* for imped true */
-	WCD_BOLERO_EVT_IMPED_FALSE,  /* for imped false */
-	WCD_BOLERO_EVT_RX_COMPANDER_SOFT_RST,
-	WCD_BOLERO_EVT_BCS_CLK_OFF,
 };
 
 struct wcd_ctrl_platform_data {
