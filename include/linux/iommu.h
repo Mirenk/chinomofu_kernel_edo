@@ -65,6 +65,12 @@ struct notifier_block;
 typedef int (*iommu_fault_handler_t)(struct iommu_domain *,
 			struct device *, unsigned long, int, void *);
 
+struct iommu_fault_ids {
+	u32 bid;
+	u32 pid;
+	u32 mid;
+};
+
 struct iommu_domain_geometry {
 	dma_addr_t aperture_start; /* First address that can be mapped    */
 	dma_addr_t aperture_end;   /* Last address that can be mapped     */
@@ -162,10 +168,11 @@ enum iommu_attr {
 	DOMAIN_ATTR_EARLY_MAP,
 	DOMAIN_ATTR_PAGE_TABLE_IS_COHERENT,
 	DOMAIN_ATTR_PAGE_TABLE_FORCE_COHERENT,
-	DOMAIN_ATTR_CB_STALL_DISABLE,
 	DOMAIN_ATTR_BITMAP_IOVA_ALLOCATOR,
 	DOMAIN_ATTR_USE_LLC_NWA,
-	DOMAIN_ATTR_NO_CFRE,
+	DOMAIN_ATTR_FAULT_MODEL_NO_CFRE,
+	DOMAIN_ATTR_FAULT_MODEL_NO_STALL,
+	DOMAIN_ATTR_FAULT_MODEL_HUPCF,
 	DOMAIN_ATTR_MAX,
 };
 
@@ -375,7 +382,8 @@ extern bool iommu_is_iova_coherent(struct iommu_domain *domain,
 				dma_addr_t iova);
 extern void iommu_set_fault_handler(struct iommu_domain *domain,
 			iommu_fault_handler_t handler, void *token);
-
+extern int iommu_get_fault_ids(struct iommu_domain *domain,
+				struct iommu_fault_ids *f_ids);
 extern void iommu_get_resv_regions(struct device *dev, struct list_head *list);
 extern void iommu_put_resv_regions(struct device *dev, struct list_head *list);
 extern int iommu_request_dm_for_dev(struct device *dev);
@@ -620,6 +628,11 @@ static inline bool iommu_is_iova_coherent(struct iommu_domain *domain,
 static inline void iommu_set_fault_handler(struct iommu_domain *domain,
 				iommu_fault_handler_t handler, void *token)
 {
+}
+static inline int iommu_get_fault_ids(struct iommu_domain *domain,
+				struct iommu_fault_ids *f_ids)
+{
+	return -EINVAL;
 }
 
 static inline void iommu_get_resv_regions(struct device *dev,

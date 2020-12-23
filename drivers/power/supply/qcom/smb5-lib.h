@@ -448,6 +448,7 @@ struct smb_charger {
 	struct smb_chg_freq	chg_freq;
 	int			otg_delay_ms;
 	int			weak_chg_icl_ua;
+	u32			sdam_base;
 	bool			pd_not_supported;
 
 	/* locks */
@@ -937,6 +938,8 @@ int smblib_get_die_health(struct smb_charger *chg,
 				union power_supply_propval *val);
 int smblib_get_prop_smb_health(struct smb_charger *chg);
 int smblib_get_prop_connector_health(struct smb_charger *chg);
+int smblib_get_prop_input_current_max(struct smb_charger *chg,
+				  union power_supply_propval *val);
 int smblib_set_prop_thermal_overheat(struct smb_charger *chg,
 			       int therm_overheat);
 int smblib_get_skin_temp_status(struct smb_charger *chg);

@@ -54,6 +54,7 @@
 
 #define ICNSS_SERVICE_LOCATION_CLIENT_NAME			"ICNSS-WLAN"
 #define ICNSS_WLAN_SERVICE_NAME					"wlan/fw"
+#define ICNSS_CHAIN1_REGULATOR                                  "vdd-3.3-ch1"
 #define ICNSS_THRESHOLD_HIGH		3600000
 #define ICNSS_THRESHOLD_LOW		3450000
 #define ICNSS_THRESHOLD_GUARD		20000
@@ -80,11 +81,11 @@ void *icnss_ipc_log_long_context;
 #define ICNSS_EVENT_SYNC_UNINTERRUPTIBLE	(ICNSS_EVENT_UNINTERRUPTIBLE | \
 						 ICNSS_EVENT_SYNC)
 static struct icnss_vreg_info icnss_vreg_info[] = {
-	{NULL, "vdd-cx-mx", 752000, 752000, 0, 0, false},
-	{NULL, "vdd-1.8-xo", 1800000, 1800000, 0, 0, false},
-	{NULL, "vdd-1.3-rfa", 1304000, 1304000, 0, 0, false},
-	{NULL, "vdd-3.3-ch1", 3312000, 3312000, 0, 0, false},
-	{NULL, "vdd-3.3-ch0", 3312000, 3312000, 0, 0, false},
+	{NULL, "vdd-cx-mx", 752000, 752000, 0, 0, false, true},
+	{NULL, "vdd-1.8-xo", 1800000, 1800000, 0, 0, false, true},
+	{NULL, "vdd-1.3-rfa", 1304000, 1304000, 0, 0, false, true},
+	{NULL, "vdd-3.3-ch1", 3312000, 3312000, 0, 0, false, true},
+	{NULL, "vdd-3.3-ch0", 3312000, 3312000, 0, 0, false, true},
 };
 
 #define ICNSS_VREG_INFO_SIZE		ARRAY_SIZE(icnss_vreg_info)
@@ -258,8 +259,17 @@ static int icnss_vreg_on(struct icnss_priv *priv)
 	for (i = 0; i < ICNSS_VREG_INFO_SIZE; i++) {
 		vreg_info = &priv->vreg_info[i];
 
-		if (!vreg_info->reg)
+		if (!vreg_info->reg || !vreg_info->is_supported)
 			continue;
+
+		if (!priv->chain_reg_info_updated &&
+		    !strcmp(ICNSS_CHAIN1_REGULATOR, vreg_info->name)) {
+			priv->chain_reg_info_updated = true;
+			if (!priv->is_chain1_supported) {
+				vreg_info->is_supported = false;
+				continue;
+			}
+		}
 
 		if (vreg_info->min_v || vreg_info->max_v) {
 			icnss_pr_vdbg("Set voltage for regulator %s\n",
@@ -307,7 +317,7 @@ static int icnss_vreg_on(struct icnss_priv *priv)
 	for (; i >= 0; i--) {
 		vreg_info = &priv->vreg_info[i];
 
-		if (!vreg_info->reg)
+		if (!vreg_info->reg || !vreg_info->is_supported)
 			continue;
 
 		regulator_disable(vreg_info->reg);
@@ -332,7 +342,7 @@ static int icnss_vreg_off(struct icnss_priv *priv)
 	for (i = ICNSS_VREG_INFO_SIZE - 1; i >= 0; i--) {
 		vreg_info = &priv->vreg_info[i];
 
-		if (!vreg_info->reg)
+		if (!vreg_info->reg || !vreg_info->is_supported)
 			continue;
 
 		icnss_pr_vdbg("Regulator %s being disabled\n", vreg_info->name);
@@ -571,26 +581,6 @@ int icnss_power_off(struct device *dev)
 }
 EXPORT_SYMBOL(icnss_power_off);
 
-int icnss_update_fw_down_params(struct icnss_priv *priv,
-				struct icnss_uevent_fw_down_data *fw_down_data,
-				bool crashed)
-{
-	fw_down_data->crashed = crashed;
-
-	if (!priv->hang_event_data_va)
-		return -EINVAL;
-
-	priv->hang_event_data = kmemdup(priv->hang_event_data_va,
-					priv->hang_event_data_len,
-					GFP_ATOMIC);
-	if (!priv->hang_event_data)
-		return -ENOMEM;
-
-	// Update the hang event params
-	fw_down_data->hang_event_data = priv->hang_event_data;
-	fw_down_data->hang_event_data_len = priv->hang_event_data_len;
-	return 0;
-}
 
 static irqreturn_t fw_error_fatal_handler(int irq, void *ctx)
 {
@@ -608,7 +598,6 @@ static irqreturn_t fw_crash_indication_handler(int irq, void *ctx)
 {
 	struct icnss_priv *priv = ctx;
 	struct icnss_uevent_fw_down_data fw_down_data = {0};
-	int ret = 0;
 
 	icnss_pr_err("Received early crash indication from FW\n");
 
@@ -617,18 +606,9 @@ static irqreturn_t fw_crash_indication_handler(int irq, void *ctx)
 		icnss_ignore_fw_timeout(true);
 
 		if (test_bit(ICNSS_FW_READY, &priv->state)) {
-			ret = icnss_update_fw_down_params(priv, &fw_down_data,
-							  true);
-			if (ret)
-				icnss_pr_err("Unable to allocate memory for Hang event data\n");
-
+			fw_down_data.crashed = true;
 			icnss_call_driver_uevent(priv, ICNSS_UEVENT_FW_DOWN,
 						 &fw_down_data);
-
-			if (!ret) {
-				kfree(priv->hang_event_data);
-				priv->hang_event_data = NULL;
-			}
 		}
 	}
 
@@ -876,15 +856,16 @@ static int icnss_driver_event_server_arrive(void *data)
 	clear_bit(ICNSS_FW_DOWN, &penv->state);
 	icnss_ignore_fw_timeout(false);
 
+	if (test_bit(ICNSS_WLFW_CONNECTED, &penv->state)) {
+		icnss_pr_err("QMI Server already in Connected State\n");
+		ICNSS_ASSERT(0);
+	}
+
 	ret = icnss_connect_to_fw_server(penv, data);
 	if (ret)
 		goto fail;
 
 	set_bit(ICNSS_WLFW_CONNECTED, &penv->state);
-
-	ret = icnss_hw_power_on(penv);
-	if (ret)
-		goto clear_server;
 
 	ret = wlfw_ind_register_send_sync_msg(penv);
 	if (ret < 0) {
@@ -893,32 +874,36 @@ static int icnss_driver_event_server_arrive(void *data)
 			goto qmi_registered;
 		}
 		ignore_assert = true;
-		goto err_power_on;
+		goto clear_server;
 	}
 
 	if (!penv->msa_va) {
 		icnss_pr_err("Invalid MSA address\n");
 		ret = -EINVAL;
-		goto err_power_on;
+		goto clear_server;
 	}
 
 	ret = wlfw_msa_mem_info_send_sync_msg(penv);
 	if (ret < 0) {
 		ignore_assert = true;
-		goto err_power_on;
+		goto clear_server;
 	}
 
 	ret = wlfw_msa_ready_send_sync_msg(penv);
 	if (ret < 0) {
 		ignore_assert = true;
-		goto err_power_on;
+		goto clear_server;
 	}
 
 	ret = wlfw_cap_send_sync_msg(penv);
 	if (ret < 0) {
 		ignore_assert = true;
-		goto err_power_on;
+		goto clear_server;
 	}
+
+	ret = icnss_hw_power_on(penv);
+	if (ret)
+		goto clear_server;
 
 	wlfw_dynamic_feature_mask_send_sync_msg(penv,
 						dynamic_feature_mask);
@@ -934,8 +919,6 @@ static int icnss_driver_event_server_arrive(void *data)
 
 	return ret;
 
-err_power_on:
-	icnss_hw_power_off(penv);
 clear_server:
 	icnss_clear_server(penv);
 fail:
@@ -1186,32 +1169,6 @@ out:
 	return 0;
 }
 
-static int icnss_call_driver_remove(struct icnss_priv *priv)
-{
-	icnss_pr_dbg("Calling driver remove state: 0x%lx\n", priv->state);
-
-	clear_bit(ICNSS_FW_READY, &priv->state);
-
-	if (test_bit(ICNSS_DRIVER_UNLOADING, &priv->state))
-		return 0;
-
-	if (!test_bit(ICNSS_DRIVER_PROBED, &priv->state))
-		return 0;
-
-	if (!priv->ops || !priv->ops->remove)
-		return 0;
-
-	set_bit(ICNSS_DRIVER_UNLOADING, &priv->state);
-	priv->ops->remove(&priv->pdev->dev);
-
-	clear_bit(ICNSS_DRIVER_UNLOADING, &priv->state);
-	clear_bit(ICNSS_DRIVER_PROBED, &priv->state);
-
-	icnss_hw_power_off(priv);
-
-	return 0;
-}
-
 static int icnss_fw_crashed(struct icnss_priv *priv,
 			    struct icnss_event_pd_service_down_data *event_data)
 {
@@ -1231,6 +1188,46 @@ static int icnss_fw_crashed(struct icnss_priv *priv,
 	return 0;
 }
 
+int icnss_update_hang_event_data(struct icnss_priv *priv,
+				 struct icnss_uevent_hang_data *hang_data)
+{
+	if (!priv->hang_event_data_va)
+		return -EINVAL;
+
+	priv->hang_event_data = kmemdup(priv->hang_event_data_va,
+					priv->hang_event_data_len,
+					GFP_ATOMIC);
+	if (!priv->hang_event_data)
+		return -ENOMEM;
+
+	// Update the hang event params
+	hang_data->hang_event_data = priv->hang_event_data;
+	hang_data->hang_event_data_len = priv->hang_event_data_len;
+
+	return 0;
+}
+
+int icnss_send_hang_event_data(struct icnss_priv *priv)
+{
+	struct icnss_uevent_hang_data hang_data = {0};
+	int ret = 0xFF;
+
+	if (priv->early_crash_ind) {
+		ret = icnss_update_hang_event_data(priv, &hang_data);
+		if (ret)
+			icnss_pr_err("Unable to allocate memory for Hang event data\n");
+	}
+	icnss_call_driver_uevent(priv, ICNSS_UEVENT_HANG_DATA,
+				 &hang_data);
+
+	if (!ret) {
+		kfree(priv->hang_event_data);
+		priv->hang_event_data = NULL;
+	}
+
+	return 0;
+}
+
 static int icnss_driver_event_pd_service_down(struct icnss_priv *priv,
 					      void *data)
 {
@@ -1243,6 +1240,8 @@ static int icnss_driver_event_pd_service_down(struct icnss_priv *priv,
 
 	if (priv->force_err_fatal)
 		ICNSS_ASSERT(0);
+
+	icnss_send_hang_event_data(priv);
 
 	if (priv->early_crash_ind) {
 		icnss_pr_dbg("PD Down ignored as early indication is processed: %d, state: 0x%lx\n",
@@ -1312,6 +1311,12 @@ static int icnss_driver_event_idle_restart(void *data)
 
 	if (!penv->ops || !penv->ops->idle_restart)
 		return 0;
+
+	if (!test_bit(ICNSS_DRIVER_PROBED, &penv->state) ||
+	    test_bit(ICNSS_DRIVER_UNLOADING, &penv->state)) {
+		icnss_pr_err("Driver unloaded or unloading is in progress, so reject idle restart");
+		return -EINVAL;
+	}
 
 	if (penv->is_ssr || test_bit(ICNSS_PDR, &penv->state) ||
 	    test_bit(ICNSS_REJUVENATE, &penv->state)) {
@@ -1429,8 +1434,13 @@ static void icnss_update_state_send_modem_shutdown(struct icnss_priv *priv,
 		if (atomic_read(&priv->is_shutdown)) {
 			atomic_set(&priv->is_shutdown, false);
 			if (!test_bit(ICNSS_PD_RESTART, &priv->state) &&
-				!test_bit(ICNSS_SHUTDOWN_DONE, &priv->state)) {
-				icnss_call_driver_remove(priv);
+				!test_bit(ICNSS_SHUTDOWN_DONE, &priv->state) &&
+				!test_bit(ICNSS_BLOCK_SHUTDOWN, &priv->state)) {
+				clear_bit(ICNSS_FW_READY, &priv->state);
+				icnss_driver_event_post(
+					  ICNSS_DRIVER_EVENT_UNREGISTER_DRIVER,
+					  ICNSS_EVENT_SYNC_UNINTERRUPTIBLE,
+					  NULL);
 			}
 		}
 
@@ -2294,6 +2304,9 @@ int icnss_trigger_recovery(struct device *dev)
 	if (!ret)
 		set_bit(ICNSS_HOST_TRIGGERED_PDR, &priv->state);
 
+	icnss_pr_warn("PD restart request completed, ret: %d state: 0x%lx\n",
+		      ret, priv->state);
+
 out:
 	return ret;
 }
@@ -2325,6 +2338,12 @@ int icnss_idle_restart(struct device *dev)
 
 	if (!priv) {
 		icnss_pr_err("Invalid drvdata: dev %pK", dev);
+		return -EINVAL;
+	}
+
+	if (!test_bit(ICNSS_DRIVER_PROBED, &penv->state) ||
+	    test_bit(ICNSS_DRIVER_UNLOADING, &penv->state)) {
+		icnss_pr_err("Driver unloaded or unloading is in progress, so reject idle restart");
 		return -EINVAL;
 	}
 
@@ -2753,6 +2772,9 @@ static int icnss_stats_show_state(struct seq_file *s, struct icnss_priv *priv)
 			continue;
 		case ICNSS_PDR:
 			seq_puts(s, "PDR TRIGGERED");
+			continue;
+		case ICNSS_DEL_SERVER:
+			seq_puts(s, "DEL SERVER");
 		}
 
 		seq_printf(s, "UNKNOWN-%d", i);
@@ -3449,6 +3471,7 @@ static int icnss_probe(struct platform_device *pdev)
 	priv->pdev = pdev;
 
 	priv->vreg_info = icnss_vreg_info;
+	priv->is_chain1_supported = true;
 
 	icnss_allow_recursive_recovery(dev);
 

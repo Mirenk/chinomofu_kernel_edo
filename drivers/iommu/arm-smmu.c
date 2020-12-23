@@ -70,6 +70,7 @@
 #include "iommu-logger.h"
 #include <linux/debugfs.h>
 #include <linux/uaccess.h>
+#include <linux/bitfield.h>
 
 /*
  * Apparently, some Qualcomm arm64 platforms which appear to expose their SMMU
@@ -155,7 +156,6 @@ struct arm_smmu_impl_def_reg {
 	u32 offset;
 	u32 value;
 };
-
 
 /*
  * attach_count
@@ -1675,6 +1675,46 @@ static phys_addr_t arm_smmu_verify_fault(struct iommu_domain *domain,
 	return (phys == 0 ? phys_post_tlbiall : phys);
 }
 
+int iommu_get_fault_ids(struct iommu_domain *domain,
+			struct iommu_fault_ids *f_ids)
+{
+	struct arm_smmu_domain *smmu_domain;
+	struct arm_smmu_cfg *cfg;
+	struct arm_smmu_device *smmu;
+	void __iomem *cb_base;
+	u32 fsr, fsynr1;
+	int ret;
+
+	if (!domain || !f_ids)
+		return -EINVAL;
+
+	smmu_domain = to_smmu_domain(domain);
+	cfg = &smmu_domain->cfg;
+	smmu = smmu_domain->smmu;
+
+	ret = arm_smmu_power_on(smmu->pwr);
+	if (ret)
+		return ret;
+
+	cb_base = ARM_SMMU_CB(smmu, cfg->cbndx);
+	fsr = readl_relaxed(cb_base + ARM_SMMU_CB_FSR);
+
+	if (!(fsr & FSR_FAULT)) {
+		arm_smmu_power_off(smmu->pwr);
+		return -EINVAL;
+	}
+
+	fsynr1 = readl_relaxed(cb_base + ARM_SMMU_CB_FSYNR1);
+	arm_smmu_power_off(smmu->pwr);
+
+	f_ids->bid = FIELD_GET(FSYNR1_BID, fsynr1);
+	f_ids->pid = FIELD_GET(FSYNR1_PID, fsynr1);
+	f_ids->mid = FIELD_GET(FSYNR1_MID, fsynr1);
+
+	return 0;
+}
+EXPORT_SYMBOL(iommu_get_fault_ids);
+
 static irqreturn_t arm_smmu_context_fault(int irq, void *dev)
 {
 	int flags, ret, tmp;
@@ -1737,6 +1777,11 @@ static irqreturn_t arm_smmu_context_fault(int irq, void *dev)
 			"Context fault handled by client: iova=0x%08lx, cb=%d, fsr=0x%x, fsynr0=0x%x, fsynr1=0x%x\n",
 			iova, cfg->cbndx, fsr, fsynr0, fsynr1);
 		dev_dbg(smmu->dev,
+			"Client info: BID=0x%x, PID=0x%x, MID=0x%x\n",
+			FIELD_GET(FSYNR1_BID, fsynr1),
+			FIELD_GET(FSYNR1_PID, fsynr1),
+			FIELD_GET(FSYNR1_MID, fsynr1));
+		dev_dbg(smmu->dev,
 			"soft iova-to-phys=%pa\n", &phys_soft);
 		ret = IRQ_HANDLED;
 		resume = RESUME_TERMINATE;
@@ -1749,7 +1794,11 @@ static irqreturn_t arm_smmu_context_fault(int irq, void *dev)
 			dev_err(smmu->dev,
 				"Unhandled context fault: iova=0x%08lx, cb=%d, fsr=0x%x, fsynr0=0x%x, fsynr1=0x%x\n",
 				iova, cfg->cbndx, fsr, fsynr0, fsynr1);
-
+			dev_err(smmu->dev,
+				"Client info: BID=0x%x, PID=0x%x, MID=0x%x\n",
+				FIELD_GET(FSYNR1_BID, fsynr1),
+				FIELD_GET(FSYNR1_PID, fsynr1),
+				FIELD_GET(FSYNR1_MID, fsynr1));
 
 			dev_err(smmu->dev,
 				"soft iova-to-phys=%pa\n", &phys_soft);
@@ -2022,13 +2071,14 @@ static void arm_smmu_write_context_bank(struct arm_smmu_device *smmu, int idx,
 	} else
 		reg |= SCTLR_SHCFG_NSH << SCTLR_SHCFG_SHIFT;
 
-	if (attributes & (1 << DOMAIN_ATTR_CB_STALL_DISABLE)) {
-		reg &= ~SCTLR_CFCFG;
-		reg |= SCTLR_HUPCF;
-	}
-
-	if (attributes & (1 << DOMAIN_ATTR_NO_CFRE))
+	if (attributes & (1 << DOMAIN_ATTR_FAULT_MODEL_NO_CFRE))
 		reg &= ~SCTLR_CFRE;
+
+	if (attributes & (1 << DOMAIN_ATTR_FAULT_MODEL_NO_STALL))
+		reg &= ~SCTLR_CFCFG;
+
+	if (attributes & (1 << DOMAIN_ATTR_FAULT_MODEL_HUPCF))
+		reg |= SCTLR_HUPCF;
 
 	if ((!(attributes & (1 << DOMAIN_ATTR_S1_BYPASS)) &&
 	     !(attributes & (1 << DOMAIN_ATTR_EARLY_MAP))) || !stage1)
@@ -2350,6 +2400,7 @@ out_clear_smmu:
 	smmu_domain->smmu = NULL;
 out_logger:
 	iommu_logger_unregister(smmu_domain->logger);
+	smmu_domain->logger = NULL;
 out_unlock:
 	mutex_unlock(&smmu_domain->init_mutex);
 	return ret;
@@ -2981,15 +3032,19 @@ static int arm_smmu_setup_default_domain(struct device *dev,
 	if (of_property_match_string(np, "qcom,iommu-faults",
 				     "stall-disable") >= 0)
 		__arm_smmu_domain_set_attr(domain,
-			DOMAIN_ATTR_CB_STALL_DISABLE, &attr);
+			DOMAIN_ATTR_FAULT_MODEL_NO_STALL, &attr);
+
+	if (of_property_match_string(np, "qcom,iommu-faults", "no-CFRE") >= 0)
+		__arm_smmu_domain_set_attr(
+			domain, DOMAIN_ATTR_FAULT_MODEL_NO_CFRE, &attr);
+
+	if (of_property_match_string(np, "qcom,iommu-faults", "HUPCF") >= 0)
+		__arm_smmu_domain_set_attr(
+			domain, DOMAIN_ATTR_FAULT_MODEL_HUPCF, &attr);
 
 	if (of_property_match_string(np, "qcom,iommu-faults", "non-fatal") >= 0)
 		__arm_smmu_domain_set_attr(domain,
 			DOMAIN_ATTR_NON_FATAL_FAULTS, &attr);
-
-	if (of_property_match_string(np, "qcom,iommu-faults", "no-CFRE") >= 0)
-		__arm_smmu_domain_set_attr(
-			domain, DOMAIN_ATTR_NO_CFRE, &attr);
 
 	/* Default value: disabled */
 	ret = of_property_read_u32(np, "qcom,iommu-vmid", &val);
@@ -3787,14 +3842,10 @@ static int arm_smmu_domain_get_attr(struct iommu_domain *domain,
 			& (1 << DOMAIN_ATTR_PAGE_TABLE_FORCE_COHERENT));
 		ret = 0;
 		break;
-	case DOMAIN_ATTR_CB_STALL_DISABLE:
-		*((int *)data) = !!(smmu_domain->attributes
-			& (1 << DOMAIN_ATTR_CB_STALL_DISABLE));
-		ret = 0;
-		break;
-	case DOMAIN_ATTR_NO_CFRE:
-		*((int *)data) = !!(smmu_domain->attributes
-			& (1 << DOMAIN_ATTR_NO_CFRE));
+	case DOMAIN_ATTR_FAULT_MODEL_NO_CFRE:
+	case DOMAIN_ATTR_FAULT_MODEL_NO_STALL:
+	case DOMAIN_ATTR_FAULT_MODEL_HUPCF:
+		*((int *)data) = !!(smmu_domain->attributes & (1U << attr));
 		ret = 0;
 		break;
 	default:
@@ -3991,8 +4042,9 @@ static int __arm_smmu_domain_set_attr2(struct iommu_domain *domain,
 		break;
 	}
 	case DOMAIN_ATTR_BITMAP_IOVA_ALLOCATOR:
-	case DOMAIN_ATTR_CB_STALL_DISABLE:
-	case DOMAIN_ATTR_NO_CFRE:
+	case DOMAIN_ATTR_FAULT_MODEL_NO_CFRE:
+	case DOMAIN_ATTR_FAULT_MODEL_NO_STALL:
+	case DOMAIN_ATTR_FAULT_MODEL_HUPCF:
 		if (*((int *)data))
 			smmu_domain->attributes |=
 				1 << attr;

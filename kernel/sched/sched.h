@@ -111,6 +111,7 @@ struct walt_sched_stats {
 	int nr_big_tasks;
 	u64 cumulative_runnable_avg_scaled;
 	u64 pred_demands_sum_scaled;
+	unsigned int nr_rtg_high_prio_tasks;
 };
 
 struct group_cpu_time {
@@ -2645,6 +2646,12 @@ enum sched_boost_policy {
 
 #ifdef CONFIG_SCHED_WALT
 
+#define WALT_MANY_WAKEUP_DEFAULT 1000
+static inline bool walt_want_remote_wakeup(void)
+{
+	return sysctl_sched_many_wakeup_threshold < WALT_MANY_WAKEUP_DEFAULT;
+}
+
 static inline int cluster_first_cpu(struct sched_cluster *cluster)
 {
 	return cpumask_first(&cluster->cpus);
@@ -2790,6 +2797,18 @@ struct related_thread_group *task_related_thread_group(struct task_struct *p)
 	return rcu_dereference(p->grp);
 }
 
+static inline bool task_rtg_high_prio(struct task_struct *p)
+{
+	return task_in_related_thread_group(p) &&
+		(p->prio <= sysctl_walt_rtg_cfs_boost_prio);
+}
+
+static inline bool walt_low_latency_task(struct task_struct *p)
+{
+	return p->low_latency &&
+		(task_util(p) < sysctl_walt_low_latency_task_threshold);
+}
+
 /* Is frequency of two cpus synchronized with each other? */
 static inline int same_freq_domain(int src_cpu, int dst_cpu)
 {
@@ -2807,7 +2826,6 @@ static inline int same_freq_domain(int src_cpu, int dst_cpu)
 #define	CPU_RESERVED	1
 
 extern enum sched_boost_policy boost_policy;
-extern unsigned int sched_task_filter_util;
 static inline enum sched_boost_policy sched_boost_policy(void)
 {
 	return boost_policy;
@@ -2933,7 +2951,7 @@ static inline enum sched_boost_policy task_boost_policy(struct task_struct *p)
 		 * under conservative boost.
 		 */
 		if (sched_boost() == CONSERVATIVE_BOOST &&
-				task_util(p) <= sched_task_filter_util)
+			task_util(p) <= sysctl_sched_min_task_util_for_boost)
 			policy = SCHED_BOOST_NONE;
 	}
 
@@ -3024,6 +3042,11 @@ struct related_thread_group *task_related_thread_group(struct task_struct *p)
 	return NULL;
 }
 
+static inline bool task_rtg_high_prio(struct task_struct *p)
+{
+	return false;
+}
+
 static inline u32 task_load(struct task_struct *p) { return 0; }
 static inline u32 task_pl(struct task_struct *p) { return 0; }
 
@@ -3087,6 +3110,10 @@ static inline unsigned int power_cost(int cpu, u64 demand)
 #endif
 
 static inline void note_task_waking(struct task_struct *p, u64 wallclock) { }
+static inline bool walt_want_remote_wakeup(void)
+{
+	return false;
+}
 #endif	/* CONFIG_SCHED_WALT */
 
 struct sched_avg_stats {

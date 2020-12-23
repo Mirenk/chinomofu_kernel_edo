@@ -2893,6 +2893,9 @@ static int syna_tcm_resume(struct device *dev)
 
 	if (!tcm_hcd->init_okay)
 		syna_tcm_deferred_probe(dev);
+
+	if (!tcm_hcd->in_suspend)
+		return 0;
 	else {
 		if (tcm_hcd->irq_enabled) {
 			tcm_hcd->watchdog.run = false;
@@ -2900,9 +2903,6 @@ static int syna_tcm_resume(struct device *dev)
 			tcm_hcd->enable_irq(tcm_hcd, false, false);
 		}
 	}
-
-	if (!tcm_hcd->in_suspend)
-		return 0;
 
 	retval = syna_tcm_enable_regulator(tcm_hcd, true);
 	if (retval < 0) {
@@ -3732,11 +3732,6 @@ static int syna_tcm_remove(struct platform_device *pdev)
 	return 0;
 }
 
-static void syna_tcm_shutdown(struct platform_device *pdev)
-{
-	syna_tcm_remove(pdev);
-}
-
 #ifdef CONFIG_PM
 static const struct dev_pm_ops syna_tcm_dev_pm_ops = {
 #if !defined(CONFIG_DRM) && !defined(CONFIG_FB)
@@ -3756,7 +3751,6 @@ static struct platform_driver syna_tcm_driver = {
 	},
 	.probe = syna_tcm_probe,
 	.remove = syna_tcm_remove,
-	.shutdown = syna_tcm_shutdown,
 };
 
 static int __init syna_tcm_module_init(void)

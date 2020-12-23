@@ -993,7 +993,7 @@ static int qg_process_esr_data(struct qpnp_qg *chip)
 
 static int qg_esr_estimate(struct qpnp_qg *chip)
 {
-	int rc, i, ibat = 0;
+	int rc, i, ibat = 0, temp = 0;
 	u8 esr_done_count, reg0 = 0, reg1 = 0;
 	bool is_charging = false;
 
@@ -1018,6 +1018,17 @@ static int qg_esr_estimate(struct qpnp_qg *chip)
 	if (chip->charge_status != POWER_SUPPLY_STATUS_CHARGING &&
 			!chip->dt.esr_discharge_enable)
 		return 0;
+
+	/* Ignore ESR if battery-temp is below a threshold */
+	rc = qg_get_battery_temp(chip, &temp);
+	if (rc < 0)
+		return rc;
+	if (temp < chip->dt.esr_low_temp_threshold) {
+		qg_dbg(chip, QG_DEBUG_ESR,
+			"Battery temperature(%d) below threshold(%d) for ESR\n",
+				temp, chip->dt.esr_low_temp_threshold);
+		return 0;
+	}
 
 	if (chip->batt_soc != INT_MIN && (chip->batt_soc <
 					chip->dt.esr_disable_soc)) {
@@ -2005,6 +2016,7 @@ done:
 static int qg_setprop_batt_age_level(struct qpnp_qg *chip, int batt_age_level)
 {
 	int rc = 0;
+	u16 data = 0;
 
 	if (!chip->dt.multi_profile_load)
 		return 0;
@@ -2029,6 +2041,13 @@ static int qg_setprop_batt_age_level(struct qpnp_qg *chip, int batt_age_level)
 		if (rc < 0)
 			pr_err("error in storing batt_age_level rc =%d\n", rc);
 	}
+
+	/* Clear the learned capacity on loading a new profile */
+	rc = qg_sdam_multibyte_write(QG_SDAM_LEARNED_CAPACITY_OFFSET,
+						(u8 *)&data, 2);
+
+	if (rc < 0)
+		pr_err("Failed to clear SDAM learnt capacity rc=%d\n", rc);
 
 	qg_dbg(chip, QG_DEBUG_PROFILE, "Profile with batt_age_level = %d loaded\n",
 						chip->batt_age_level);
@@ -2407,13 +2426,15 @@ static int qg_parallel_status_update(struct qpnp_qg *chip)
 		"Parallel status changed Enabled=%d\n", parallel_enabled);
 
 	mutex_lock(&chip->data_lock);
-
 	/*
-	 * Parallel charger uses the same external sense, hence do not
-	 * enable SMB sensing if PMI632 is configured for external sense.
+	 * dt.qg_ext_sense = Uses external rsense, if defined do not
+	 *		     enable SMB sensing (for non-CP parallel charger).
+	 * dt.cp_iin_sns = Uses CP IIN_SNS, enable SMB sensing (for CP charger).
 	 */
-	if (!chip->dt.qg_ext_sense)
-		update_smb = true;
+	if (is_cp_available(chip))
+		update_smb = chip->dt.use_cp_iin_sns ? true : false;
+	else if (is_parallel_available(chip))
+		update_smb = chip->dt.qg_ext_sense ? false : true;
 
 	rc = process_rt_fifo_data(chip, update_smb);
 	if (rc < 0)
@@ -2664,7 +2685,8 @@ static int qg_notifier_cb(struct notifier_block *nb,
 	if ((strcmp(psy->desc->name, "battery") == 0)
 		|| (strcmp(psy->desc->name, "parallel") == 0)
 		|| (strcmp(psy->desc->name, "usb") == 0)
-		|| (strcmp(psy->desc->name, "dc") == 0)) {
+		|| (strcmp(psy->desc->name, "dc") == 0)
+		|| (strcmp(psy->desc->name, "charge_pump_master") == 0)) {
 		/*
 		 * We cannot vote for awake votable here as that takes
 		 * a mutex lock and this is executed in an atomic context.
@@ -4032,6 +4054,7 @@ static int qg_parse_cl_dt(struct qpnp_qg *chip)
 #define DEFAULT_SYS_MIN_VOLT_MV		2800
 #define DEFAULT_FVSS_VBAT_MV		3500
 #define DEFAULT_TCSS_ENTRY_SOC		90
+#define DEFAULT_ESR_LOW_TEMP_THRESHOLD	100 /* 10 deg */
 static int qg_parse_dt(struct qpnp_qg *chip)
 {
 	int rc = 0;
@@ -4208,7 +4231,7 @@ static int qg_parse_dt(struct qpnp_qg *chip)
 	if (rc < 0)
 		chip->dt.rbat_conn_mohm = 0;
 	else
-		chip->dt.rbat_conn_mohm = temp;
+		chip->dt.rbat_conn_mohm = (int)temp;
 
 	/* esr */
 	chip->dt.esr_disable = of_property_read_bool(node,
@@ -4241,6 +4264,13 @@ static int qg_parse_dt(struct qpnp_qg *chip)
 	else
 		chip->dt.esr_min_ibat_ua = (int)temp;
 
+	rc = of_property_read_u32(node, "qcom,esr-low-temp-threshold", &temp);
+	if (rc < 0)
+		chip->dt.esr_low_temp_threshold =
+					DEFAULT_ESR_LOW_TEMP_THRESHOLD;
+	else
+		chip->dt.esr_low_temp_threshold = (int)temp;
+
 	rc = of_property_read_u32(node, "qcom,shutdown_soc_threshold", &temp);
 	if (rc < 0)
 		chip->dt.shutdown_soc_threshold = -EINVAL;
@@ -4254,6 +4284,9 @@ static int qg_parse_dt(struct qpnp_qg *chip)
 		chip->dt.sys_min_volt_mv = temp;
 
 	chip->dt.qg_ext_sense = of_property_read_bool(node, "qcom,qg-ext-sns");
+
+	chip->dt.use_cp_iin_sns = of_property_read_bool(node,
+							"qcom,use-cp-iin-sns");
 
 	chip->dt.use_s7_ocv = of_property_read_bool(node, "qcom,qg-use-s7-ocv");
 
@@ -4342,6 +4375,7 @@ static int process_suspend(struct qpnp_qg *chip)
 		return rc;
 	}
 	sleep_fifo_length &= SLEEP_IBAT_QUALIFIED_LENGTH_MASK;
+	sleep_fifo_length++;
 
 	if (chip->dt.qg_sleep_config) {
 		qg_dbg(chip, QG_DEBUG_STATUS, "Suspend: Forcing S2_SLEEP\n");

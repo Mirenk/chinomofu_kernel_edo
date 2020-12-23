@@ -1428,6 +1428,7 @@ static void apps_ipa_packet_receive_notify(void *priv,
 		IPAWANDBG_LOW("Rx packet was received");
 		skb->dev = IPA_NETDEV();
 		skb->protocol = htons(ETH_P_MAP);
+		skb_set_mac_header(skb, 0);
 
 		if (ipa3_rmnet_res.ipa_napi_enable) {
 			trace_rmnet_ipa_netif_rcv_skb3(dev->stats.rx_packets);
@@ -1618,8 +1619,6 @@ static int handle3_egress_format(struct net_device *dev,
 			rc = ipa3_qmi_set_aggr_info(DATA_AGGR_TYPE_QMAP_V01);
 		}
 		rmnet_ipa3_ctx->ipa_mhi_aggr_formet_set = true;
-		/* register Q6 indication */
-		rc = ipa3_qmi_req_ind();
 		return rc;
 	}
 
@@ -2102,7 +2101,7 @@ static void ipa3_wwan_setup(struct net_device *dev)
 	dev->flags &= ~(IFF_BROADCAST | IFF_MULTICAST);
 	dev->needed_headroom = HEADROOM_FOR_QMAP;
 	dev->needed_tailroom = TAILROOM;
-	dev->watchdog_timeo = 1000;
+	dev->watchdog_timeo = msecs_to_jiffies(10000);
 }
 
 /**
@@ -2570,8 +2569,9 @@ static int ipa3_wwan_remove(struct platform_device *pdev)
 	if (ipa3_rmnet_res.ipa_napi_enable)
 		netif_napi_del(&(rmnet_ipa3_ctx->wwan_priv->napi));
 	mutex_unlock(&rmnet_ipa3_ctx->pipe_handle_guard);
-	IPAWANINFO("rmnet_ipa unregister_netdev\n");
+	IPAWANDBG("rmnet_ipa unregister_netdev started\n");
 	unregister_netdev(IPA_NETDEV());
+	IPAWANDBG("rmnet_ipa unregister_netdev completed\n");
 	ipa3_wwan_deregister_netdev_pm_client();
 	cancel_work_sync(&ipa3_tx_wakequeue_work);
 	cancel_delayed_work(&ipa_tether_stats_poll_wakequeue_work);
@@ -2757,12 +2757,13 @@ static int ipa3_lcl_mdm_ssr_notifier_cb(struct notifier_block *this,
 	switch (code) {
 	case SUBSYS_BEFORE_SHUTDOWN:
 		IPAWANINFO("IPA received MPSS BEFORE_SHUTDOWN\n");
+		/*Stop netdev first to stop queueing pkts to Q6 */
+		if (IPA_NETDEV())
+			netif_stop_queue(IPA_NETDEV());
 		/* send SSR before-shutdown notification to IPACM */
 		rmnet_ipa_send_ssr_notification(false);
 		atomic_set(&rmnet_ipa3_ctx->is_ssr, 1);
 		ipa3_q6_pre_shutdown_cleanup();
-		if (IPA_NETDEV())
-			netif_stop_queue(IPA_NETDEV());
 		ipa3_qmi_stop_workqueues();
 		ipa3_wan_ioctl_stop_qmi_messages();
 		ipa_stop_polling_stats();

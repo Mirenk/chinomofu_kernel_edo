@@ -822,6 +822,21 @@ static bool a6xx_gmu_gx_is_on(struct kgsl_device *device)
 }
 
 /*
+ * a6xx_gmu_cx_is_on() - Check if CX is on using GPUCC register
+ * @device - Pointer to KGSL device struct
+ */
+static bool a6xx_gmu_cx_is_on(struct kgsl_device *device)
+{
+	unsigned int val;
+
+	if (ADRENO_QUIRK(ADRENO_DEVICE(device), ADRENO_QUIRK_CX_GDSC))
+		return regulator_is_enabled(KGSL_GMU_DEVICE(device)->cx_gdsc);
+
+	gmu_core_regread(device, A6XX_GPU_CC_CX_GDSCR, &val);
+	return (val & BIT(31));
+}
+
+/*
  * a6xx_gmu_sptprac_is_on() - Check if SPTP is on using pwr status register
  * @adreno_dev - Pointer to adreno_device
  * This check should only be performed if the keepalive bit is set or it
@@ -1149,18 +1164,18 @@ static int a6xx_gmu_load_firmware(struct kgsl_device *device)
 	int ret, offset = 0;
 
 	/* GMU fw already saved and verified so do nothing new */
-	if (gmu->fw_image)
-		return 0;
+	if (!gmu->fw_image) {
 
-	if (a6xx_core->gmufw_name == NULL)
-		return -EINVAL;
+		if (a6xx_core->gmufw_name == NULL)
+			return -EINVAL;
 
-	ret = request_firmware(&gmu->fw_image, a6xx_core->gmufw_name,
-			device->dev);
-	if (ret) {
-		dev_err(device->dev, "request_firmware (%s) failed: %d\n",
-				a6xx_core->gmufw_name, ret);
-		return ret;
+		ret = request_firmware(&gmu->fw_image, a6xx_core->gmufw_name,
+				device->dev);
+		if (ret) {
+			dev_err(device->dev, "request_firmware (%s) failed: %d\n",
+					a6xx_core->gmufw_name, ret);
+			return ret;
+		}
 	}
 
 	/*
@@ -1183,11 +1198,12 @@ static int a6xx_gmu_load_firmware(struct kgsl_device *device)
 		offset += sizeof(*blk);
 
 		if (blk->type == GMU_BLK_TYPE_PREALLOC_REQ ||
-				blk->type == GMU_BLK_TYPE_PREALLOC_PERSIST_REQ)
+			blk->type == GMU_BLK_TYPE_PREALLOC_PERSIST_REQ) {
 			ret = gmu_prealloc_req(device, blk);
 
-		if (ret)
-			return ret;
+			if (ret)
+				return ret;
+		}
 	}
 
 	 /* Request any other cache ranges that might be required */
@@ -1619,6 +1635,8 @@ static void a6xx_gmu_snapshot(struct kgsl_device *device,
 {
 	unsigned int val;
 
+	dev_err(device->dev, "GMU snapshot started at 0x%llx ticks\n",
+			a6xx_gmu_read_ao_counter(device));
 	a6xx_gmu_snapshot_versions(device, snapshot);
 
 	a6xx_gmu_snapshot_memories(device, snapshot);
@@ -1741,6 +1759,7 @@ struct gmu_dev_ops adreno_a6xx_gmudev = {
 	.enable_lm = a6xx_gmu_enable_lm,
 	.rpmh_gpu_pwrctrl = a6xx_gmu_rpmh_gpu_pwrctrl,
 	.gx_is_on = a6xx_gmu_gx_is_on,
+	.cx_is_on = a6xx_gmu_cx_is_on,
 	.wait_for_lowest_idle = a6xx_gmu_wait_for_lowest_idle,
 	.wait_for_gmu_idle = a6xx_gmu_wait_for_idle,
 	.ifpc_store = a6xx_gmu_ifpc_store,

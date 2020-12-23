@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: ISC
 /*
  * Copyright (c) 2012-2017 Qualcomm Atheros, Inc.
- * Copyright (c) 2018-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2018-2020, The Linux Foundation. All rights reserved.
  */
 
 #include <linux/moduleparam.h>
@@ -4318,6 +4318,8 @@ wil_get_vr_profile_name(enum wmi_vr_profile profile)
 		return "COMMON_AP";
 	case WMI_VR_PROFILE_COMMON_STA:
 		return "COMMON_STA";
+	case WMI_VR_PROFILE_COMMON_STA_PS:
+		return "COMMON_STA_PS";
 	default:
 		return "unknown";
 	}
@@ -4337,7 +4339,9 @@ int wmi_set_vr_profile(struct wil6210_priv *wil, u8 profile)
 	};
 
 	cmd.profile = profile;
-	wil_info(wil, "sending set vr config command, profile=%d\n", profile);
+	cmd.max_mcs = wil->max_mcs;
+	wil_info(wil, "sending set vr config command, profile=%d, max_mcs=%d\n",
+		 profile, wil->max_mcs);
 	rc = wmi_call(wil, WMI_SET_VR_PROFILE_CMDID, vif->mid, &cmd,
 		      sizeof(cmd), WMI_SET_VR_PROFILE_EVENTID,
 		      &reply, sizeof(reply), WIL_WMI_CALL_GENERAL_TO_MS);

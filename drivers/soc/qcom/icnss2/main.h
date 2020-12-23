@@ -21,6 +21,10 @@
 
 #define WCN6750_DEVICE_ID 0x6750
 #define ADRASTEA_DEVICE_ID 0xabcd
+#define QMI_WLFW_MAX_NUM_MEM_SEG 32
+#define THERMAL_NAME_LENGTH 20
+#define ICNSS_SMEM_VALUE_MASK 0xFFFFFFFF
+#define ICNSS_SMEM_SEQ_NO_POS 16
 
 extern uint64_t dynamic_feature_mask;
 
@@ -48,7 +52,16 @@ enum icnss_driver_event_type {
 	ICNSS_DRIVER_EVENT_IDLE_SHUTDOWN,
 	ICNSS_DRIVER_EVENT_IDLE_RESTART,
 	ICNSS_DRIVER_EVENT_FW_INIT_DONE_IND,
+	ICNSS_DRIVER_EVENT_QDSS_TRACE_REQ_MEM,
+	ICNSS_DRIVER_EVENT_QDSS_TRACE_SAVE,
+	ICNSS_DRIVER_EVENT_QDSS_TRACE_FREE,
 	ICNSS_DRIVER_EVENT_MAX,
+};
+
+enum icnss_soc_wake_event_type {
+	ICNSS_SOC_WAKE_REQUEST_EVENT,
+	ICNSS_SOC_WAKE_RELEASE_EVENT,
+	ICNSS_SOC_WAKE_EVENT_MAX,
 };
 
 struct icnss_event_server_arrive_data {
@@ -64,6 +77,15 @@ struct icnss_event_pd_service_down_data {
 struct icnss_driver_event {
 	struct list_head list;
 	enum icnss_driver_event_type type;
+	bool sync;
+	struct completion complete;
+	int ret;
+	void *data;
+};
+
+struct icnss_soc_wake_event {
+	struct list_head list;
+	enum icnss_soc_wake_event_type type;
 	bool sync;
 	struct completion complete;
 	int ret;
@@ -90,6 +112,8 @@ enum icnss_driver_state {
 	ICNSS_MODE_ON,
 	ICNSS_BLOCK_SHUTDOWN,
 	ICNSS_PDR,
+	ICNSS_DEL_SERVER,
+	ICNSS_COLD_BOOT_CAL,
 };
 
 struct ce_irq_list {
@@ -114,6 +138,15 @@ struct icnss_vreg_info {
 	u32 enabled;
 };
 
+struct icnss_cpr_info {
+	resource_size_t tcs_cmd_base_addr;
+	resource_size_t tcs_cmd_data_addr;
+	void __iomem *tcs_cmd_base_addr_io;
+	void __iomem *tcs_cmd_data_addr_io;
+	u32 cpr_pmic_addr;
+	u32 voltage;
+};
+
 enum icnss_vreg_type {
 	ICNSS_VREG_PRIM,
 };
@@ -130,11 +163,29 @@ struct icnss_clk_info {
 	u32 enabled;
 };
 
+struct icnss_fw_mem {
+	size_t size;
+	void *va;
+	phys_addr_t pa;
+	u8 valid;
+	u32 type;
+	unsigned long attrs;
+};
+
+enum icnss_power_save_mode {
+	ICNSS_POWER_SAVE_ENTER = 1,
+	ICNSS_POWER_SAVE_EXIT,
+};
 struct icnss_stats {
 	struct {
 		uint32_t posted;
 		uint32_t processed;
 	} events[ICNSS_DRIVER_EVENT_MAX];
+
+	struct {
+		u32 posted;
+		u32 processed;
+	} soc_wake_events[ICNSS_SOC_WAKE_EVENT_MAX];
 
 	struct {
 		uint32_t request;
@@ -194,6 +245,15 @@ struct icnss_stats {
 	uint32_t device_info_req;
 	uint32_t device_info_resp;
 	uint32_t device_info_err;
+	u32 exit_power_save_req;
+	u32 exit_power_save_resp;
+	u32 exit_power_save_err;
+	u32 enter_power_save_req;
+	u32 enter_power_save_resp;
+	u32 enter_power_save_err;
+	u32 soc_wake_req;
+	u32 soc_wake_resp;
+	u32 soc_wake_err;
 };
 
 #define WLFW_MAX_TIMESTAMP_LEN 32
@@ -244,6 +304,21 @@ struct icnss_msi_config {
 	struct icnss_msi_user *users;
 };
 
+struct icnss_thermal_cdev {
+	struct list_head tcdev_list;
+	int tcdev_id;
+	unsigned long curr_thermal_state;
+	unsigned long max_thermal_state;
+	struct device_node *dev_node;
+	struct thermal_cooling_device *tcdev;
+};
+
+struct smp2p_out_info {
+	unsigned short seq;
+	unsigned int smem_bit;
+	struct qcom_smem_state *smem_state;
+};
+
 struct icnss_priv {
 	uint32_t magic;
 	struct platform_device *pdev;
@@ -251,6 +326,7 @@ struct icnss_priv {
 	struct ce_irq_list ce_irq_list[ICNSS_MAX_IRQ_REGISTRATIONS];
 	struct list_head vreg_list;
 	struct list_head clk_list;
+	struct icnss_cpr_info cpr_info;
 	unsigned long device_id;
 	struct icnss_msi_config *msi_config;
 	u32 msi_base_data;
@@ -262,14 +338,20 @@ struct icnss_priv {
 	void __iomem *mem_base_va;
 	u32 mem_base_size;
 	struct iommu_domain *iommu_domain;
+	dma_addr_t smmu_iova_start;
+	size_t smmu_iova_len;
 	dma_addr_t smmu_iova_ipa_start;
 	size_t smmu_iova_ipa_len;
 	struct qmi_handle qmi;
 	struct list_head event_list;
+	struct list_head soc_wake_msg_list;
 	spinlock_t event_lock;
+	spinlock_t soc_wake_msg_lock;
 	struct work_struct event_work;
 	struct work_struct fw_recv_msg_work;
+	struct work_struct soc_wake_msg_work;
 	struct workqueue_struct *event_wq;
+	struct workqueue_struct *soc_wake_wq;
 	phys_addr_t msa_pa;
 	phys_addr_t msi_addr_pa;
 	dma_addr_t msi_addr_iova;
@@ -312,6 +394,7 @@ struct icnss_priv {
 	struct mutex dev_lock;
 	uint32_t fw_error_fatal_irq;
 	uint32_t fw_early_crash_irq;
+	struct smp2p_out_info smp2p_info;
 	struct completion unblock_shutdown;
 	struct adc_tm_param vph_monitor_params;
 	struct adc_tm_chip *adc_tm_dev;
@@ -320,8 +403,16 @@ struct icnss_priv {
 	bool vbatt_supported;
 	char function_name[WLFW_FUNCTION_NAME_LEN + 1];
 	bool is_ssr;
+	bool smmu_s1_enable;
 	struct kobject *icnss_kobject;
 	atomic_t is_shutdown;
+	u32 qdss_mem_seg_len;
+	struct icnss_fw_mem qdss_mem[QMI_WLFW_MAX_NUM_MEM_SEG];
+	void *get_info_cb_ctx;
+	int (*get_info_cb)(void *ctx, void *event, int event_len);
+	atomic_t soc_wake_ref_count;
+	struct list_head icnss_tcdev_list;
+	struct mutex tcdev_lock;
 };
 
 struct icnss_reg_info {
@@ -338,5 +429,13 @@ int icnss_driver_event_post(struct icnss_priv *priv,
 			    u32 flags, void *data);
 void icnss_allow_recursive_recovery(struct device *dev);
 void icnss_disallow_recursive_recovery(struct device *dev);
+char *icnss_soc_wake_event_to_str(enum icnss_soc_wake_event_type type);
+int icnss_soc_wake_event_post(struct icnss_priv *priv,
+			      enum icnss_soc_wake_event_type type,
+			      u32 flags, void *data);
+int icnss_get_iova(struct icnss_priv *priv, u64 *addr, u64 *size);
+int icnss_get_iova_ipa(struct icnss_priv *priv, u64 *addr, u64 *size);
+int icnss_get_cpr_info(struct icnss_priv *priv);
+int icnss_update_cpr_info(struct icnss_priv *priv);
 #endif
 

@@ -5,7 +5,7 @@
  */
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (c) 2011-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2011-2020, The Linux Foundation. All rights reserved.
  */
 
 #include <linux/kernel.h>
@@ -22,6 +22,7 @@
 #include <linux/elf.h>
 #include <linux/wait.h>
 #include <linux/cdev.h>
+#include <linux/srcu.h>
 #include <linux/atomic.h>
 #include <linux/vmalloc.h>
 #include <soc/qcom/ramdump.h>
@@ -67,6 +68,8 @@ struct ramdump_device {
 	char *elfcore_buf;
 	unsigned long attrs;
 	bool complete_ramdump;
+	bool abort_ramdump;
+	struct srcu_struct rd_srcu;
 };
 
 static int ramdump_open(struct inode *inode, struct file *filep)
@@ -166,14 +169,25 @@ static ssize_t ramdump_read(struct file *filep, char __user *buf, size_t count,
 	size_t copy_size = 0, alignsize;
 	unsigned char *alignbuf = NULL, *finalbuf = NULL;
 	int ret = 0;
+	int srcu_idx;
 	loff_t orig_pos = *pos;
 
 	if ((filep->f_flags & O_NONBLOCK) && !entry->data_ready)
 		return -EAGAIN;
 
-	ret = wait_event_interruptible(rd_dev->dump_wait_q, entry->data_ready);
+	ret = wait_event_interruptible(rd_dev->dump_wait_q,
+				(entry->data_ready || rd_dev->abort_ramdump));
 	if (ret)
 		return ret;
+
+	srcu_idx = srcu_read_lock(&rd_dev->rd_srcu);
+
+	if (rd_dev->abort_ramdump) {
+		pr_err("Ramdump(%s): Ramdump aborted\n", rd_dev->name);
+		rd_dev->ramdump_status = -1;
+		ret = -ETIME;
+		goto ramdump_done;
+	}
 
 	if (*pos < rd_dev->elfcore_size) {
 		copy_size = rd_dev->elfcore_size - *pos;
@@ -186,8 +200,10 @@ static ssize_t ramdump_read(struct file *filep, char __user *buf, size_t count,
 		*pos += copy_size;
 		count -= copy_size;
 		buf += copy_size;
-		if (count == 0)
+		if (count == 0) {
+			srcu_read_unlock(&rd_dev->rd_srcu, srcu_idx);
 			return copy_size;
+		}
 	}
 
 	addr = offset_translate(*pos - rd_dev->elfcore_size, rd_dev,
@@ -231,6 +247,8 @@ static ssize_t ramdump_read(struct file *filep, char __user *buf, size_t count,
 
 	if ((unsigned long)device_mem & 0x7) {
 		bytes_before = 8 - ((unsigned long)device_mem & 0x7);
+		bytes_before = min_t(unsigned long, (unsigned long)copy_size,
+				     bytes_before);
 		memcpy_fromio(alignbuf, device_mem, bytes_before);
 		device_mem += bytes_before;
 		alignbuf += bytes_before;
@@ -264,12 +282,15 @@ static ssize_t ramdump_read(struct file *filep, char __user *buf, size_t count,
 	pr_debug("Ramdump(%s): Read %zd bytes from address %lx.",
 			rd_dev->name, copy_size, addr);
 
+	srcu_read_unlock(&rd_dev->rd_srcu, srcu_idx);
+
 	return *pos - orig_pos;
 
 ramdump_done:
 	if (!vaddr && origdevice_mem)
 		dma_unremap(rd_dev->dev->parent, origdevice_mem, copy_size);
 
+	srcu_read_unlock(&rd_dev->rd_srcu, srcu_idx);
 	vfree(finalbuf);
 	*pos = 0;
 	reset_ramdump_entry(entry);
@@ -374,6 +395,7 @@ void *create_ramdump_device(const char *dev_name, struct device *parent)
 
 	mutex_init(&rd_dev->consumer_lock);
 	atomic_set(&rd_dev->readers_left, 0);
+	init_srcu_struct(&rd_dev->rd_srcu);
 	cdev_init(&rd_dev->cdev, &ramdump_file_ops);
 
 	ret = cdev_add(&rd_dev->cdev, MKDEV(MAJOR(ramdump_dev), minor), 1);
@@ -386,6 +408,7 @@ void *create_ramdump_device(const char *dev_name, struct device *parent)
 	return (void *)rd_dev;
 
 fail_cdev_add:
+	cleanup_srcu_struct(&rd_dev->rd_srcu);
 	mutex_destroy(&rd_dev->consumer_lock);
 	device_unregister(rd_dev->dev);
 fail_return_minor:
@@ -406,6 +429,7 @@ void destroy_ramdump_device(void *dev)
 
 	cdev_del(&rd_dev->cdev);
 	device_unregister(rd_dev->dev);
+	cleanup_srcu_struct(&rd_dev->rd_srcu);
 	ida_simple_remove(&rd_minor_id, minor);
 	kfree(rd_dev);
 }
@@ -486,6 +510,7 @@ static int _do_ramdump(void *handle, struct ramdump_segment *segments,
 	list_for_each_entry(entry, &rd_dev->consumer_list, list)
 		entry->data_ready = true;
 	rd_dev->ramdump_status = -1;
+	rd_dev->abort_ramdump = false;
 
 	reinit_completion(&rd_dev->ramdump_complete);
 	atomic_set(&rd_dev->readers_left, rd_dev->consumers);
@@ -502,6 +527,11 @@ static int _do_ramdump(void *handle, struct ramdump_segment *segments,
 		pr_err("Ramdump(%s): Timed out waiting for userspace.\n",
 			rd_dev->name);
 		ret = -EPIPE;
+		rd_dev->abort_ramdump = true;
+
+		/* Wait for pending readers to complete (if any) */
+		synchronize_srcu(&rd_dev->rd_srcu);
+
 	} else
 		ret = (rd_dev->ramdump_status == 0) ? 0 : -EPIPE;
 
@@ -615,6 +645,7 @@ static int _do_minidump(void *handle, struct ramdump_segment *segments,
 	list_for_each_entry(entry, &rd_dev->consumer_list, list)
 		entry->data_ready = true;
 	rd_dev->ramdump_status = -1;
+	rd_dev->abort_ramdump = false;
 
 	reinit_completion(&rd_dev->ramdump_complete);
 	atomic_set(&rd_dev->readers_left, rd_dev->consumers);
@@ -631,6 +662,10 @@ static int _do_minidump(void *handle, struct ramdump_segment *segments,
 		pr_err("Ramdump(%s): Timed out waiting for userspace.\n",
 		       rd_dev->name);
 		ret = -EPIPE;
+		rd_dev->abort_ramdump = true;
+
+		/* Wait for pending readers to complete (if any) */
+		synchronize_srcu(&rd_dev->rd_srcu);
 	} else {
 		ret = (rd_dev->ramdump_status == 0) ? 0 : -EPIPE;
 	}

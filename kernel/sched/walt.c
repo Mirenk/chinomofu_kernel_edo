@@ -232,12 +232,19 @@ void inc_rq_walt_stats(struct rq *rq, struct task_struct *p)
 {
 	inc_nr_big_task(&rq->walt_stats, p);
 	walt_inc_cumulative_runnable_avg(rq, p);
+
+	p->rtg_high_prio = task_rtg_high_prio(p);
+	if (p->rtg_high_prio)
+		rq->walt_stats.nr_rtg_high_prio_tasks++;
+
 }
 
 void dec_rq_walt_stats(struct rq *rq, struct task_struct *p)
 {
 	dec_nr_big_task(&rq->walt_stats, p);
 	walt_dec_cumulative_runnable_avg(rq, p);
+	if (p->rtg_high_prio)
+		rq->walt_stats.nr_rtg_high_prio_tasks--;
 }
 
 void fixup_walt_sched_stats_common(struct rq *rq, struct task_struct *p,
@@ -441,22 +448,27 @@ void sched_account_irqtime(int cpu, struct task_struct *curr,
 				 u64 delta, u64 wallclock)
 {
 	struct rq *rq = cpu_rq(cpu);
-	unsigned long flags, nr_windows;
+	unsigned long nr_windows;
 	u64 cur_jiffies_ts;
 
-	raw_spin_lock_irqsave(&rq->lock, flags);
-
 	/*
-	 * cputime (wallclock) uses sched_clock so use the same here for
-	 * consistency.
+	 * We called with interrupts disabled. Take the rq lock only
+	 * if we are in idle context in which case update_task_ravg()
+	 * call is needed.
 	 */
-	delta += sched_clock() - wallclock;
-	cur_jiffies_ts = get_jiffies_64();
-
-	if (is_idle_task(curr))
+	if (is_idle_task(curr)) {
+		raw_spin_lock(&rq->lock);
+		/*
+		 * cputime (wallclock) uses sched_clock so use the same here
+		 * for consistency.
+		 */
+		delta += sched_clock() - wallclock;
 		update_task_ravg(curr, rq, IRQ_UPDATE, sched_ktime_clock(),
 				 delta);
+		raw_spin_unlock(&rq->lock);
+	}
 
+	cur_jiffies_ts = get_jiffies_64();
 	nr_windows = cur_jiffies_ts - rq->irqload_ts;
 
 	if (nr_windows) {
@@ -474,7 +486,6 @@ void sched_account_irqtime(int cpu, struct task_struct *curr,
 
 	rq->cur_irqload += delta;
 	rq->irqload_ts = cur_jiffies_ts;
-	raw_spin_unlock_irqrestore(&rq->lock, flags);
 }
 
 /*
@@ -1404,7 +1415,7 @@ unsigned int max_possible_efficiency = 1;
 unsigned int min_possible_efficiency = UINT_MAX;
 
 unsigned int sysctl_sched_conservative_pl;
-unsigned int sysctl_sched_many_wakeup_threshold = 1000;
+unsigned int sysctl_sched_many_wakeup_threshold = WALT_MANY_WAKEUP_DEFAULT;
 
 #define INC_STEP 8
 #define DEC_STEP 2
@@ -2240,7 +2251,7 @@ static void update_history(struct rq *rq, struct task_struct *p,
 	p->ravg.pred_demand = pred_demand;
 	p->ravg.pred_demand_scaled = pred_demand_scaled;
 
-	if (demand_scaled > sched_task_filter_util)
+	if (demand_scaled > sysctl_sched_min_task_util_for_colocation)
 		p->unfilter = sysctl_sched_task_unfilter_period;
 	else
 		if (p->unfilter)

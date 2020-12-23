@@ -157,6 +157,7 @@ enum icnss_driver_state {
 	ICNSS_MODE_ON,
 	ICNSS_BLOCK_SHUTDOWN,
 	ICNSS_PDR,
+	ICNSS_DEL_SERVER,
 };
 
 struct ce_irq_list {
@@ -172,6 +173,7 @@ struct icnss_vreg_info {
 	u32 load_ua;
 	unsigned long settle_delay;
 	bool required;
+	bool is_supported;
 };
 
 struct icnss_clk_info {
@@ -354,6 +356,8 @@ struct icnss_priv {
 	void __iomem *hang_event_data_va;
 	uint16_t hang_event_data_len;
 	void *hang_event_data;
+	bool is_chain1_supported;
+	bool chain_reg_info_updated;
 };
 
 struct icnss_reg_info {

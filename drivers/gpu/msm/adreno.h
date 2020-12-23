@@ -264,8 +264,8 @@ enum adreno_preempt_states {
 /**
  * struct adreno_preemption
  * @state: The current state of preemption
- * @counters: Memory descriptor for the memory where the GPU writes the
- * preemption counters on switch
+ * @scratch: Memory descriptor for the memory where the GPU writes the
+ * current ctxt record address and preemption counters on switch
  * @timer: A timer to make sure preemption doesn't stall
  * @work: A work struct for the preemption worker (for 5XX)
  * preempt_level: The level of preemption (for 6XX)
@@ -275,7 +275,7 @@ enum adreno_preempt_states {
  */
 struct adreno_preemption {
 	atomic_t state;
-	struct kgsl_memdesc counters;
+	struct kgsl_memdesc scratch;
 	struct timer_list timer;
 	struct work_struct work;
 	unsigned int preempt_level;
@@ -881,6 +881,7 @@ struct adreno_gpudev {
 
 	struct adreno_irq *irq;
 	int num_prio_levels;
+	int cp_rb_cntl;
 	unsigned int vbif_xin_halt_ctrl0_mask;
 	unsigned int gbif_client_halt_mask;
 	unsigned int gbif_arb_halt_mask;
@@ -1109,6 +1110,7 @@ void adreno_rscc_regread(struct adreno_device *adreno_dev,
 		unsigned int offsetwords, unsigned int *value);
 void adreno_isense_regread(struct adreno_device *adreno_dev,
 		unsigned int offsetwords, unsigned int *value);
+u32 adreno_get_ucode_version(const u32 *data);
 
 
 #define ADRENO_TARGET(_name, _id) \
@@ -1736,8 +1738,9 @@ static inline int adreno_perfcntr_active_oob_get(struct kgsl_device *device)
 	if (!ret) {
 		ret = gmu_core_dev_oob_set(device, oob_perfcntr);
 		if (ret) {
+			gmu_core_snapshot(device);
 			adreno_set_gpu_fault(ADRENO_DEVICE(device),
-				ADRENO_GMU_FAULT);
+				ADRENO_GMU_FAULT_SKIP_SNAPSHOT);
 			adreno_dispatcher_schedule(device);
 			kgsl_active_count_put(device);
 		}

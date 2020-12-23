@@ -5,7 +5,7 @@
  * and licensed under the license of the file.
  */
 /*
- * Copyright (c) 2017-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2017-2020, The Linux Foundation. All rights reserved.
  */
 
 #ifndef _IPA_PM_H_
@@ -18,7 +18,7 @@
 #define IPA_PM_MAX_EX_CL 64
 #define IPA_PM_THRESHOLD_MAX 5
 #define IPA_PM_EXCEPTION_MAX 5
-#define IPA_PM_DEFERRED_TIMEOUT 10
+#define IPA_PM_DEFERRED_TIMEOUT 100
 
 /*
  * ipa_pm group names

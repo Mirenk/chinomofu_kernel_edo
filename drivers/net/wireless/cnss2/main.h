@@ -11,7 +11,11 @@
 #include <linux/pm_qos.h>
 #include <net/cnss2.h>
 #include <soc/qcom/memory_dump.h>
+#ifdef CONFIG_MSM_SUBSYSTEM_RESTART
+#include <soc/qcom/ramdump.h>
+#include <soc/qcom/subsystem_notif.h>
 #include <soc/qcom/subsystem_restart.h>
+#endif
 
 #include "qmi.h"
 
@@ -23,6 +27,9 @@
 #define RECOVERY_TIMEOUT		60000
 #define WLAN_WD_TIMEOUT_MS		60000
 #define TIME_CLOCK_FREQ_HZ		19200000
+#define CNSS_RAMDUMP_MAGIC		0x574C414E
+#define CNSS_RAMDUMP_VERSION		0
+#define MAX_FIRMWARE_NAME_LEN		20
 
 #define CNSS_EVENT_SYNC   BIT(0)
 #define CNSS_EVENT_UNINTERRUPTIBLE BIT(1)
@@ -74,16 +81,23 @@ struct cnss_pinctrl_info {
 	struct pinctrl_state *bootstrap_active;
 	struct pinctrl_state *wlan_en_active;
 	struct pinctrl_state *wlan_en_sleep;
+	int bt_en_gpio;
 };
 
+#ifdef CONFIG_MSM_SUBSYSTEM_RESTART
 struct cnss_subsys_info {
 	struct subsys_device *subsys_device;
 	struct subsys_desc subsys_desc;
 	void *subsys_handle;
 };
+#else
+struct cnss_subsys_info {
+	void *subsys_handle;
+};
+#endif
 
 struct cnss_ramdump_info {
-	struct ramdump_device *ramdump_dev;
+	void *ramdump_dev;
 	unsigned long ramdump_size;
 	void *ramdump_va;
 	phys_addr_t ramdump_pa;
@@ -107,7 +121,7 @@ struct cnss_dump_data {
 };
 
 struct cnss_ramdump_info_v2 {
-	struct ramdump_device *ramdump_dev;
+	void *ramdump_dev;
 	unsigned long ramdump_size;
 	void *dump_data_vaddr;
 	u8 dump_data_valid;
@@ -167,6 +181,21 @@ enum cnss_fw_dump_type {
 	CNSS_FW_IMAGE,
 	CNSS_FW_RDDM,
 	CNSS_FW_REMOTE_HEAP,
+	CNSS_FW_DUMP_TYPE_MAX,
+};
+
+struct cnss_dump_entry {
+	u32 type;
+	u32 entry_start;
+	u32 entry_num;
+};
+
+struct cnss_dump_meta_info {
+	u32 magic;
+	u32 version;
+	u32 chipset;
+	u32 total_entries;
+	struct cnss_dump_entry entry[CNSS_FW_DUMP_TYPE_MAX];
 };
 
 enum cnss_driver_event_type {
@@ -313,17 +342,20 @@ struct cnss_plat_data {
 	struct cnss_bus_bw_info bus_bw_info;
 	struct notifier_block modem_nb;
 	struct notifier_block reboot_nb;
+	struct notifier_block panic_nb;
 	struct cnss_platform_cap cap;
 	struct pm_qos_request qos_request;
 	struct cnss_device_version device_version;
 	unsigned long device_id;
 	enum cnss_driver_status driver_status;
 	u32 recovery_count;
+	u8 recovery_enabled;
 	unsigned long driver_state;
 	struct list_head event_list;
 	spinlock_t event_lock; /* spinlock for driver work event handling */
 	struct work_struct event_work;
 	struct workqueue_struct *event_wq;
+	struct work_struct recovery_work;
 	struct qmi_handle qmi_wlfw;
 	struct wlfw_rf_chip_info chip_info;
 	struct wlfw_rf_board_info board_info;
@@ -351,7 +383,9 @@ struct cnss_plat_data {
 	u8 *diag_reg_read_buf;
 	u8 cal_done;
 	u8 powered_on;
-	char firmware_name[13];
+	u8 use_fw_path_with_prefix;
+	char firmware_name[MAX_FIRMWARE_NAME_LEN];
+	char fw_fallback_name[MAX_FIRMWARE_NAME_LEN];
 	struct completion rddm_complete;
 	struct completion recovery_complete;
 	struct cnss_control_params ctrl_params;
@@ -366,7 +400,8 @@ struct cnss_plat_data {
 	int (*get_info_cb)(void *ctx, void *event, int event_len);
 	u8 use_nv_mac;
 	u8 set_wlaon_pwr_ctrl;
-	struct kobject *shutdown_kobj;
+	u8 fw_pcie_gen_switch;
+	u8 pcie_gen_speed;
 };
 
 #ifdef CONFIG_ARCH_QCOM
@@ -424,5 +459,6 @@ int cnss_minidump_add_region(struct cnss_plat_data *plat_priv,
 int cnss_minidump_remove_region(struct cnss_plat_data *plat_priv,
 				enum cnss_fw_dump_type type, int seg_no,
 				void *va, phys_addr_t pa, size_t size);
-
+int cnss_pci_update_qtime_sync_period(struct device *dev,
+				      unsigned int qtime_sync_period);
 #endif /* _CNSS_MAIN_H */
