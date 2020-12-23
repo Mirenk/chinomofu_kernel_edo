@@ -69,6 +69,8 @@
 #include "wlan_qct_sys.h"
 #include <wlan_scan_ucfg_api.h>
 #include <wlan_blm_api.h>
+#include <lim_assoc_utils.h>
+#include "wlan_mlme_ucfg_api.h"
 
 #define ASCII_SPACE_CHARACTER 0x20
 
@@ -3824,16 +3826,6 @@ QDF_STATUS lim_tx_complete(void *context, qdf_nbuf_t buf, bool free)
 	return QDF_STATUS_SUCCESS;
 }
 
-static void lim_ht_width_switch_cback(struct mac_context *mac,
-				QDF_STATUS status, uint32_t *data,
-				struct pe_session *pe_session)
-{
-	pe_debug("status %d for ht width switch for vdev %d", status,
-		 pe_session->smeSessionId);
-	if (QDF_IS_STATUS_SUCCESS(status))
-		lim_switch_channel_vdev_started(pe_session);
-}
-
 static void lim_ht_switch_chnl_params(struct pe_session *pe_session)
 {
 	uint8_t center_freq = 0;
@@ -3847,7 +3839,7 @@ static void lim_ht_switch_chnl_params(struct pe_session *pe_session)
 		return;
 	}
 
-	primary_channel = pe_session->gLimChannelSwitch.primaryChannel;
+	primary_channel = pe_session->currentOperChannel;
 	if (eHT_CHANNEL_WIDTH_40MHZ ==
 	    pe_session->htRecommendedTxWidthSet) {
 		ch_width = CH_WIDTH_40MHZ;
@@ -3861,13 +3853,22 @@ static void lim_ht_switch_chnl_params(struct pe_session *pe_session)
 			ch_width = CH_WIDTH_20MHZ;
 	}
 
-	/* notify HAL */
-	pe_debug("HT IE changed: Primary Channel: %d Secondary Channel Offset: %d Channel Width: %d",
+	pe_session->gLimChannelSwitch.primaryChannel = primary_channel;
+	pe_session->currentReqChannel = primary_channel;
+	pe_session->ch_center_freq_seg0 = center_freq;
+	pe_session->gLimChannelSwitch.ch_center_freq_seg0 = center_freq;
+	pe_session->ch_width = ch_width;
+	pe_session->gLimChannelSwitch.ch_width = ch_width;
+	pe_session->gLimChannelSwitch.sec_ch_offset =
+				pe_session->htSecondaryChannelOffset;
+	pe_session->gLimChannelSwitch.ch_center_freq_seg1 = 0;
+
+	pe_debug("HT IE changed: Primary Channel: %d center chan: %d Channel Width: %d",
 		 primary_channel, center_freq,
 		 pe_session->htRecommendedTxWidthSet);
 	pe_session->channelChangeReasonCode =
 			LIM_SWITCH_CHANNEL_HT_WIDTH;
-	mac->lim.gpchangeChannelCallback = lim_ht_width_switch_cback;
+	mac->lim.gpchangeChannelCallback = lim_switch_channel_cback;
 	mac->lim.gpchangeChannelData = NULL;
 
 	lim_send_switch_chnl_params(mac, primary_channel,
@@ -3961,12 +3962,15 @@ void lim_update_sta_run_time_ht_switch_chnl_params(struct mac_context *mac,
 		return;
 	}
 
+	if (lim_is_roam_synch_in_progress(pe_session)) {
+		pe_debug("Roaming in progress, ignore HT IE BW update");
+		return;
+	}
+
 	if (pe_session->htSecondaryChannelOffset !=
 	    (uint8_t) pHTInfo->secondaryChannelOffset
 	    || pe_session->htRecommendedTxWidthSet !=
 	    (uint8_t) pHTInfo->recommendedTxWidthSet) {
-		pe_session->gLimChannelSwitch.primaryChannel =
-							pHTInfo->primaryChannel;
 		pe_session->htSecondaryChannelOffset =
 			(ePhyChanBondState) pHTInfo->secondaryChannelOffset;
 		pe_session->htRecommendedTxWidthSet =
@@ -6749,8 +6753,70 @@ void lim_add_bss_he_cfg(tpAddBssParams add_bss, struct pe_session *session)
 	add_bss->he_sta_obsspd = session->he_sta_obsspd;
 }
 
+static bool lim_check_is_bss_greater_than_4_nss_supp(struct pe_session *
+session,
+						     tDot11fIEhe_cap *he_cap)
+{
+	uint8_t i;
+	uint16_t mcs_map;
+#define NSS_4 4
+#define NSS_8 8
+
+	if (!session->he_capable || !he_cap->present)
+		return false;
+	mcs_map = he_cap->rx_he_mcs_map_lt_80;
+	for (i = NSS_4; i < NSS_8; i++) {
+		if (((mcs_map >> (i * 2)) & 0x3) != 0x3)
+			return true;
+	}
+
+	return false;
+}
+
+static bool lim_check_he_80_mcs11_supp(struct pe_session *session,
+				       tDot11fIEhe_cap *he_cap)
+{
+	uint16_t rx_mcs_map;
+	uint16_t tx_mcs_map;
+
+	rx_mcs_map = he_cap->rx_he_mcs_map_lt_80;
+	tx_mcs_map = he_cap->tx_he_mcs_map_lt_80;
+	if ((session->nss == NSS_1x1_MODE) &&
+	    ((HE_GET_MCS_4_NSS(rx_mcs_map, 1) == HE_MCS_0_11) ||
+	     (HE_GET_MCS_4_NSS(tx_mcs_map, 1) == HE_MCS_0_11)))
+		return true;
+
+	if ((session->nss == NSS_2x2_MODE) &&
+	    ((HE_GET_MCS_4_NSS(rx_mcs_map, 2) == HE_MCS_0_11) ||
+	     (HE_GET_MCS_4_NSS(tx_mcs_map, 2) == HE_MCS_0_11)))
+		return true;
+
+	return false;
+}
+
+/**
+ * lim_check_and_force_he_ldpc_cap() - set he ladpc coding to one if
+ * channel width is > 20 or mcs 10/11 bit are supported or
+ * nss is greater than 4.
+ * @beacon_struct: beacon structure
+ * @session: A pointer to session entry.
+ *
+ * Return: None
+ */
+
+static void lim_check_and_force_he_ldpc_cap(struct pe_session *session,
+					    tDot11fIEhe_cap *he_cap)
+{
+	if (!he_cap->ldpc_coding &&
+	    (session->ch_width > CH_WIDTH_20MHZ ||
+	     lim_check_he_80_mcs11_supp(session, he_cap) ||
+	     lim_check_is_bss_greater_than_4_nss_supp(session, he_cap)))
+		he_cap->ldpc_coding = 1;
+}
+
 void lim_update_stads_he_caps(tpDphHashNode sta_ds, tpSirAssocRsp assoc_rsp,
-			      struct pe_session *session_entry)
+			      struct pe_session *session_entry,
+			      tSchBeaconStruct *beacon)
 {
 	tDot11fIEhe_cap *he_cap;
 
@@ -6760,8 +6826,14 @@ void lim_update_stads_he_caps(tpDphHashNode sta_ds, tpSirAssocRsp assoc_rsp,
 	if (!he_cap->present)
 		return;
 
-	qdf_mem_copy(&sta_ds->he_config, he_cap, sizeof(*he_cap));
+	/* setting lpdc_coding if any of assoc_rsp or beacon has ladpc_coding
+	 * enabled
+	 */
+	if (beacon)
+		he_cap->ldpc_coding |= beacon->he_cap.ldpc_coding;
+	lim_check_and_force_he_ldpc_cap(session_entry, he_cap);
 
+	qdf_mem_copy(&sta_ds->he_config, he_cap, sizeof(*he_cap));
 }
 
 void lim_update_usr_he_cap(struct mac_context *mac_ctx, struct pe_session *session)
@@ -7050,7 +7122,8 @@ void lim_update_sta_he_capable(struct mac_context *mac,
 	struct pe_session *session_entry)
 {
 	if (LIM_IS_AP_ROLE(session_entry) || LIM_IS_IBSS_ROLE(session_entry))
-		add_sta_params->he_capable = sta_ds->mlmStaContext.he_capable;
+		add_sta_params->he_capable = sta_ds->mlmStaContext.he_capable &&
+						session_entry->he_capable;
 #ifdef FEATURE_WLAN_TDLS
 	else if (STA_ENTRY_TDLS_PEER == sta_ds->staType)
 		add_sta_params->he_capable = sta_ds->mlmStaContext.he_capable;
@@ -7076,6 +7149,9 @@ void lim_update_session_he_capable(struct mac_context *mac, struct pe_session *s
 {
 	session->he_capable = true;
 	pe_debug("he_capable: %d", session->he_capable);
+	if (wlan_reg_is_24ghz_ch(session->currentOperChannel) &&
+	    !mac->mlme_cfg->vht_caps.vht_cap_info.b24ghz_band)
+		session->vhtCapability = 0;
 }
 
 void lim_update_chan_he_capable(struct mac_context *mac, tpSwitchChannelParams chan)
@@ -7084,8 +7160,8 @@ void lim_update_chan_he_capable(struct mac_context *mac, tpSwitchChannelParams c
 	pe_debug("he_capable: %d", chan->he_capable);
 }
 
-void lim_set_he_caps(struct mac_context *mac, struct pe_session *session, uint8_t *ie_start,
-		     uint32_t num_bytes)
+void lim_set_he_caps(struct mac_context *mac, struct pe_session *session,
+		     uint8_t *ie_start, uint32_t num_bytes)
 {
 	const uint8_t *ie = NULL;
 	tDot11fIEhe_cap dot11_cap;
@@ -7192,25 +7268,88 @@ void lim_set_he_caps(struct mac_context *mac, struct pe_session *session, uint8_
 
 		he_cap->rx_he_mcs_map_lt_80 = dot11_cap.rx_he_mcs_map_lt_80;
 		he_cap->tx_he_mcs_map_lt_80 = dot11_cap.tx_he_mcs_map_lt_80;
-		he_cap->rx_he_mcs_map_160 =
+		if (dot11_cap.chan_width_2) {
+			he_cap->rx_he_mcs_map_160 =
 				*((uint16_t *)dot11_cap.rx_he_mcs_map_160);
-		he_cap->tx_he_mcs_map_160 =
+			he_cap->tx_he_mcs_map_160 =
 				*((uint16_t *)dot11_cap.tx_he_mcs_map_160);
-		he_cap->rx_he_mcs_map_80_80 =
+			ie_start[1] += HE_CAP_160M_MCS_MAP_LEN;
+		}
+		if (dot11_cap.chan_width_3) {
+			he_cap->rx_he_mcs_map_80_80 =
 				*((uint16_t *)dot11_cap.rx_he_mcs_map_80_80);
-		he_cap->tx_he_mcs_map_80_80 =
+			he_cap->tx_he_mcs_map_80_80 =
 				*((uint16_t *)dot11_cap.tx_he_mcs_map_80_80);
+			ie_start[1] += HE_CAP_80P80_MCS_MAP_LEN;
+		}
 	}
 }
 
-QDF_STATUS lim_send_he_caps_ie(struct mac_context *mac_ctx, struct pe_session *session,
-			       uint8_t vdev_id)
+static void lim_intersect_he_ch_width_2g(struct mac_context *mac,
+					 struct he_capability_info *he_cap)
 {
-	uint8_t he_caps[SIR_MAC_HE_CAP_MIN_LEN + 3];
+	struct wlan_objmgr_psoc *psoc;
+	uint32_t cbm_24ghz;
+	QDF_STATUS ret;
+
+	psoc = mac->psoc;
+	if (!psoc)
+		return;
+
+	ret = ucfg_mlme_get_channel_bonding_24ghz(psoc, &cbm_24ghz);
+	if (QDF_IS_STATUS_ERROR(ret))
+		return;
+
+	pe_debug("channel bonding mode 2.4GHz %d", cbm_24ghz);
+
+	if (!cbm_24ghz) {
+		/* B0: 40Mhz channel width in the 2.4GHz band */
+		he_cap->chan_width = HE_CH_WIDTH_CLR_BIT(he_cap->chan_width, 0);
+		he_cap->he_ppdu_20_in_40Mhz_2G = 0;
+	}
+
+	pe_debug("HE cap: chan_width: 0x%07x he_ppdu_20_in_40Mhz_2G %d",
+		 he_cap->chan_width, he_cap->he_ppdu_20_in_40Mhz_2G);
+}
+
+static uint8_t lim_set_he_caps_ppet(struct mac_context *mac, uint8_t *ie,
+				    enum cds_band_type band)
+{
+	uint8_t ppe_th[WNI_CFG_HE_PPET_LEN] = {0};
+	/* Append at the end after ID + LEN + OUI + IE_Data */
+	uint8_t offset = ie[1] + 1 + 1 + 1;
+	uint8_t num_ppe_th;
+
+	if (band == CDS_BAND_2GHZ)
+		qdf_mem_copy(ppe_th, mac->mlme_cfg->he_caps.he_ppet_2g,
+			     WNI_CFG_HE_PPET_LEN);
+	else if (band == CDS_BAND_5GHZ)
+		qdf_mem_copy(ppe_th, mac->mlme_cfg->he_caps.he_ppet_5g,
+			     WNI_CFG_HE_PPET_LEN);
+	else
+		return 0;
+
+	num_ppe_th = lim_truncate_ppet(ppe_th, WNI_CFG_HE_PPET_LEN);
+
+	qdf_mem_copy(ie + offset, ppe_th, num_ppe_th);
+
+	return num_ppe_th;
+}
+
+QDF_STATUS lim_send_he_caps_ie(struct mac_context *mac_ctx,
+			       struct pe_session *session, uint8_t vdev_id)
+{
+	uint8_t he_caps[SIR_MAC_HE_CAP_MIN_LEN + HE_CAP_OUI_LEN +
+			HE_CAP_160M_MCS_MAP_LEN + HE_CAP_80P80_MCS_MAP_LEN +
+			WNI_CFG_HE_PPET_LEN];
 	struct he_capability_info *he_cap;
 	QDF_STATUS status_5g, status_2g;
 	struct wlan_objmgr_vdev *vdev;
 	enum QDF_OPMODE device_mode;
+	uint8_t he_cap_total_len = SIR_MAC_HE_CAP_MIN_LEN + HE_CAP_OUI_LEN +
+				   HE_CAP_160M_MCS_MAP_LEN +
+				   HE_CAP_80P80_MCS_MAP_LEN;
+	uint8_t num_ppe_th = 0;
 
 	vdev = wlan_objmgr_get_vdev_by_id_from_psoc(
 			mac_ctx->psoc, vdev_id,
@@ -7223,14 +7362,12 @@ QDF_STATUS lim_send_he_caps_ie(struct mac_context *mac_ctx, struct pe_session *s
 	wlan_objmgr_vdev_release_ref(vdev, WLAN_LEGACY_MAC_ID);
 
 	/* Sending only minimal info(no PPET) to FW now, update if required */
-	qdf_mem_zero(he_caps, SIR_MAC_HE_CAP_MIN_LEN + 3);
+	qdf_mem_zero(he_caps, he_cap_total_len);
 	he_caps[0] = DOT11F_EID_HE_CAP;
 	he_caps[1] = SIR_MAC_HE_CAP_MIN_LEN;
 	qdf_mem_copy(&he_caps[2], HE_CAP_OUI_TYPE, HE_CAP_OUI_SIZE);
-	lim_set_he_caps(mac_ctx, session, he_caps,
-			SIR_MAC_HE_CAP_MIN_LEN + 3);
+	lim_set_he_caps(mac_ctx, session, he_caps, he_cap_total_len);
 	he_cap = (struct he_capability_info *) (&he_caps[2 + HE_CAP_OUI_SIZE]);
-	he_cap->ppet_present = 0;
 	if(device_mode == QDF_NDI_MODE) {
 		he_cap->su_beamformee = 0;
 		he_cap->su_beamformer = 0;
@@ -7242,16 +7379,27 @@ QDF_STATUS lim_send_he_caps_ie(struct mac_context *mac_ctx, struct pe_session *s
 		he_cap->su_feedback_tone16 = 0;
 		he_cap->mu_feedback_tone16 = 0;
 	}
+
+	if (he_cap->ppet_present)
+		num_ppe_th = lim_set_he_caps_ppet(mac_ctx, he_caps,
+						  CDS_BAND_5GHZ);
+
 	status_5g = lim_send_ie(mac_ctx, vdev_id, DOT11F_EID_HE_CAP,
 			CDS_BAND_5GHZ, &he_caps[2],
-			SIR_MAC_HE_CAP_MIN_LEN + 1);
+			he_caps[1] + 1 + num_ppe_th);
 	if (QDF_IS_STATUS_ERROR(status_5g))
 		pe_err("Unable send HE Cap IE for 5GHZ band, status: %d",
 			status_5g);
 
+	lim_intersect_he_ch_width_2g(mac_ctx, he_cap);
+
+	if (he_cap->ppet_present)
+		num_ppe_th = lim_set_he_caps_ppet(mac_ctx, he_caps,
+						  CDS_BAND_2GHZ);
+
 	status_2g = lim_send_ie(mac_ctx, vdev_id, DOT11F_EID_HE_CAP,
 			CDS_BAND_2GHZ, &he_caps[2],
-			SIR_MAC_HE_CAP_MIN_LEN + 1);
+			he_caps[1] + 1 + num_ppe_th);
 	if (QDF_IS_STATUS_ERROR(status_2g))
 		pe_err("Unable send HE Cap IE for 2GHZ band, status: %d",
 			status_2g);

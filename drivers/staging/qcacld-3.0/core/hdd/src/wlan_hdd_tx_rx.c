@@ -942,9 +942,9 @@ static void __hdd_hard_start_xmit(struct sk_buff *skb,
 
 	wlan_hdd_classify_pkt(skb);
 	if (QDF_NBUF_CB_GET_PACKET_TYPE(skb) == QDF_NBUF_CB_PACKET_TYPE_ARP) {
-		is_arp = true;
 		if (qdf_nbuf_data_is_arp_req(skb) &&
 		    (adapter->track_arp_ip == qdf_nbuf_get_arp_tgt_ip(skb))) {
+			is_arp = true;
 			++adapter->hdd_stats.hdd_arp_stats.tx_arp_req_count;
 			QDF_TRACE(QDF_MODULE_ID_HDD_DATA,
 				  QDF_TRACE_LEVEL_INFO_HIGH,
@@ -1491,6 +1491,10 @@ static bool hdd_is_arp_local(struct sk_buff *skb)
 
 	arp = (struct arphdr *)skb->data;
 	if (arp->ar_op == htons(ARPOP_REQUEST)) {
+		/* if fail to acquire rtnl lock, assume it's local arp */
+		if (!rtnl_trylock())
+			return true;
+
 		in_dev = __in_dev_get_rtnl(skb->dev);
 		if (in_dev) {
 			for (ifap = &in_dev->ifa_list; (ifa = *ifap) != NULL;
@@ -1507,9 +1511,12 @@ static bool hdd_is_arp_local(struct sk_buff *skb)
 			memcpy(&tip, arp_ptr, 4);
 			hdd_debug("ARP packet: local IP: %x dest IP: %x",
 				ifa->ifa_local, tip);
-			if (ifa->ifa_local == tip)
+			if (ifa->ifa_local == tip) {
+				rtnl_unlock();
 				return true;
+			}
 		}
+		rtnl_unlock();
 	}
 
 	return false;
@@ -2110,15 +2117,14 @@ QDF_STATUS hdd_rx_packet_cbk(void *adapter_context,
 		next = skb->next;
 		skb->next = NULL;
 
-		if (QDF_NBUF_CB_PACKET_TYPE_ARP ==
-		    QDF_NBUF_CB_GET_PACKET_TYPE(skb)) {
+		if (qdf_nbuf_is_ipv4_arp_pkt(skb)) {
 			if (qdf_nbuf_data_is_arp_rsp(skb) &&
 				(adapter->track_arp_ip ==
 			     qdf_nbuf_get_arp_src_ip(skb))) {
 				++adapter->hdd_stats.hdd_arp_stats.
 							rx_arp_rsp_count;
 				QDF_TRACE(QDF_MODULE_ID_HDD_DATA,
-						QDF_TRACE_LEVEL_INFO,
+						QDF_TRACE_LEVEL_DEBUG,
 						"%s: ARP packet received",
 						__func__);
 				track_arp = true;

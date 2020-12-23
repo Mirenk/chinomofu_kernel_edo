@@ -1688,54 +1688,6 @@ QDF_STATUS csr_scan_abort_mac_scan(struct mac_context *mac_ctx,
 
 	return status;
 }
-QDF_STATUS csr_remove_nonscan_cmd_from_pending_list(struct mac_context *mac,
-						    uint8_t sessionId,
-						    eSmeCommandType commandType)
-{
-	tDblLinkList localList;
-	tListElem *pEntry;
-	tSmeCmd *pCommand;
-	tListElem *pEntryToRemove;
-	QDF_STATUS status = QDF_STATUS_E_FAILURE;
-
-	qdf_mem_zero(&localList, sizeof(tDblLinkList));
-	if (!QDF_IS_STATUS_SUCCESS(csr_ll_open(&localList))) {
-		sme_err("failed to open list");
-		return status;
-	}
-
-	pEntry = csr_nonscan_pending_ll_peek_head(mac, LL_ACCESS_NOLOCK);
-
-	/*
-	 * Have to make sure we don't loop back to the head of the list,
-	 * which will happen if the entry is NOT on the list
-	 */
-	while (pEntry) {
-		pEntryToRemove = pEntry;
-		pEntry = csr_nonscan_pending_ll_next(mac,
-					pEntry, LL_ACCESS_NOLOCK);
-		pCommand = GET_BASE_ADDR(pEntryToRemove, tSmeCmd, Link);
-
-		if ((pCommand->command == commandType) &&
-		    (pCommand->sessionId == sessionId)) {
-			/* Insert to localList and remove later */
-			csr_ll_insert_tail(&localList, pEntryToRemove,
-					   LL_ACCESS_NOLOCK);
-			status = QDF_STATUS_SUCCESS;
-		}
-	}
-
-
-	while ((pEntry = csr_ll_remove_head(&localList, LL_ACCESS_NOLOCK))) {
-		pCommand = GET_BASE_ADDR(pEntry, tSmeCmd, Link);
-		sme_debug("Sending abort for command ID %d",
-			sessionId);
-		csr_release_command(mac, pCommand);
-	}
-
-	csr_ll_close(&localList);
-	return status;
-}
 
 bool csr_roam_is_valid_channel(struct mac_context *mac, uint8_t channel)
 {
@@ -2393,8 +2345,8 @@ static QDF_STATUS csr_prepare_scan_filter(struct mac_context *mac_ctx,
 
 	filter->num_of_channels =
 		pFilter->ChannelInfo.numOfChannels;
-	if (filter->num_of_channels > QDF_MAX_NUM_CHAN)
-		filter->num_of_channels = QDF_MAX_NUM_CHAN;
+	if (filter->num_of_channels > NUM_CHANNELS)
+		filter->num_of_channels = NUM_CHANNELS;
 	qdf_mem_copy(filter->channel_list,
 			pFilter->ChannelInfo.ChannelList,
 			filter->num_of_channels);
@@ -2480,7 +2432,7 @@ static QDF_STATUS csr_prepare_scan_filter(struct mac_context *mac_ctx,
 		   &pFilter->csrPersona, &new_mode)) {
 			status = policy_mgr_get_pcl(mac_ctx->psoc, new_mode,
 				filter->pcl_channel_list, &len,
-				filter->pcl_weight_list, QDF_MAX_NUM_CHAN);
+				filter->pcl_weight_list, NUM_CHANNELS);
 			filter->num_of_pcl_channels = (uint8_t)len;
 		}
 	}
@@ -2699,6 +2651,9 @@ static QDF_STATUS csr_fill_bss_from_scan_entry(struct mac_context *mac_ctx,
 	bss_desc->assoc_disallowed = csr_is_assoc_disallowed(mac_ctx,
 							     scan_entry);
 	bss_desc->adaptive_11r_ap = scan_entry->adaptive_11r_ap;
+
+	bss_desc->mbo_oce_enabled_ap =
+			util_scan_entry_mbo_oce(scan_entry) ? true : false;
 
 	csr_fill_single_pmk_ap_cap_from_scan_entry(bss_desc, scan_entry);
 

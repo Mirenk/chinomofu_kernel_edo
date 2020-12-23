@@ -132,12 +132,13 @@ static void lim_update_stads_htcap(struct mac_context *mac_ctx,
  */
 void lim_update_assoc_sta_datas(struct mac_context *mac_ctx,
 	tpDphHashNode sta_ds, tpSirAssocRsp assoc_rsp,
-	struct pe_session *session_entry)
+	struct pe_session *session_entry, tSchBeaconStruct *beacon)
 {
 	uint32_t phy_mode;
 	bool qos_mode;
 	tDot11fIEVHTCaps *vht_caps = NULL;
 	tDot11fIEhe_cap *he_cap = NULL;
+	struct bss_description *bss_desc = NULL;
 
 	lim_get_phy_mode(mac_ctx, &phy_mode, session_entry);
 	sta_ds->staType = STA_ENTRY_SELF;
@@ -159,8 +160,7 @@ void lim_update_assoc_sta_datas(struct mac_context *mac_ctx,
 	else if (assoc_rsp->vendor_vht_ie.VHTCaps.present)
 		vht_caps = &assoc_rsp->vendor_vht_ie.VHTCaps;
 
-	if ((IS_DOT11_MODE_VHT(session_entry->dot11mode)) &&
-	    ((vht_caps) && vht_caps->present)) {
+	if (session_entry->vhtCapability && (vht_caps && vht_caps->present)) {
 		sta_ds->mlmStaContext.vhtCapability =
 			vht_caps->present;
 		/*
@@ -189,15 +189,20 @@ void lim_update_assoc_sta_datas(struct mac_context *mac_ctx,
 	}
 
 	if (IS_DOT11_MODE_HE(session_entry->dot11mode))
-		lim_update_stads_he_caps(sta_ds, assoc_rsp, session_entry);
+		lim_update_stads_he_caps(sta_ds, assoc_rsp,
+					 session_entry, beacon);
 
 	if (lim_is_sta_he_capable(sta_ds))
 		he_cap = &assoc_rsp->he_cap;
 
+	if (session_entry->lim_join_req)
+		bss_desc = &session_entry->lim_join_req->bssDescription;
+
 	if (lim_populate_peer_rate_set(mac_ctx, &sta_ds->supportedRates,
 				assoc_rsp->HTCaps.supportedMCSSet,
 				false, session_entry,
-				vht_caps, he_cap) != QDF_STATUS_SUCCESS) {
+				vht_caps, he_cap, bss_desc) !=
+				QDF_STATUS_SUCCESS) {
 		pe_err("could not get rateset and extended rate set");
 		return;
 	}
@@ -471,47 +476,6 @@ static void lim_stop_reassoc_retry_timer(struct mac_context *mac_ctx)
 	lim_deactivate_and_change_timer(mac_ctx, eLIM_REASSOC_FAIL_TIMER);
 }
 
-#ifdef WLAN_FEATURE_11W
-static void
-lim_handle_assoc_reject_status(struct mac_context *mac_ctx,
-				struct pe_session *session_entry,
-				tpSirAssocRsp assoc_rsp,
-				tSirMacAddr source_addr)
-{
-	struct sir_rssi_disallow_lst ap_info = {{0}};
-	uint32_t timeout_value =
-		assoc_rsp->TimeoutInterval.timeoutValue;
-
-	if (!(session_entry->limRmfEnabled &&
-		    assoc_rsp->status_code == eSIR_MAC_TRY_AGAIN_LATER &&
-		   (assoc_rsp->TimeoutInterval.present &&
-			(assoc_rsp->TimeoutInterval.timeoutType ==
-				SIR_MAC_TI_TYPE_ASSOC_COMEBACK))))
-		return;
-
-	/*
-	 * Add to rssi reject list, which takes care of retry
-	 * delay too. Fill the RSSI as 0, so the only param
-	 * which will allow the bssid to connect is retry delay.
-	 */
-	ap_info.retry_delay = timeout_value;
-	qdf_mem_copy(ap_info.bssid.bytes, source_addr, QDF_MAC_ADDR_SIZE);
-	ap_info.expected_rssi = LIM_MIN_RSSI;
-	lim_add_bssid_to_reject_list(mac_ctx->pdev, &ap_info);
-
-	pe_debug("ASSOC res with eSIR_MAC_TRY_AGAIN_LATER recvd. Add to time reject list(rssi reject in mac_ctx %d",
-		timeout_value);
-}
-#else
-static void
-lim_handle_assoc_reject_status(struct mac_context *mac_ctx,
-				struct pe_session *session_entry,
-				tpSirAssocRsp assoc_rsp,
-				tSirMacAddr source_addr)
-{
-}
-#endif
-
 /**
  * lim_get_nss_supported_by_ap() - finds out nss from AP's beacons
  * @vht_caps: VHT capabilities
@@ -779,8 +743,6 @@ lim_process_assoc_rsp_frame(struct mac_context *mac_ctx,
 	else
 		lim_stop_reassoc_retry_timer(mac_ctx);
 
-	lim_handle_assoc_reject_status(mac_ctx, session_entry, assoc_rsp,
-				       hdr->sa);
 
 	if (eSIR_MAC_XS_FRAME_LOSS_POOR_CHANNEL_RSSI_STATUS ==
 	   assoc_rsp->status_code &&
@@ -931,7 +893,7 @@ lim_process_assoc_rsp_frame(struct mac_context *mac_ctx,
 			lim_is_roam_synch_in_progress(session_entry)) {
 			pe_debug("Sending self sta");
 			lim_update_assoc_sta_datas(mac_ctx, sta_ds, assoc_rsp,
-				session_entry);
+				session_entry, NULL);
 			lim_update_stads_ext_cap(mac_ctx, session_entry,
 						 assoc_rsp, sta_ds);
 			/* Store assigned AID for TIM processing */
@@ -1019,16 +981,17 @@ lim_process_assoc_rsp_frame(struct mac_context *mac_ctx,
 				   session_entry->smeSessionId,
 				   session_entry->nss);
 
-	lim_update_assoc_sta_datas(mac_ctx, sta_ds, assoc_rsp, session_entry);
 	/*
 	 * Extract the AP capabilities from the beacon that
 	 * was received earlier
-	*/
+	 */
 	ie_len = lim_get_ielen_from_bss_description(
 		&session_entry->lim_join_req->bssDescription);
 	lim_extract_ap_capabilities(mac_ctx,
 		(uint8_t *)session_entry->lim_join_req->bssDescription.ieFields,
 		ie_len, beacon);
+	lim_update_assoc_sta_datas(mac_ctx, sta_ds, assoc_rsp,
+				   session_entry, beacon);
 
 	if (lim_is_session_he_capable(session_entry)) {
 		session_entry->mu_edca_present = assoc_rsp->mu_edca_present;

@@ -1642,7 +1642,7 @@ static bool lim_check_valid_mcs_for_nss(struct pe_session *session,
 	uint16_t mcs_map;
 	uint8_t mcs_count = 2, i;
 
-	if (!session->he_capable || !he_caps)
+	if (!session->he_capable || !he_caps || !he_caps->present)
 		return true;
 
 	mcs_map = he_caps->rx_he_mcs_map_lt_80;
@@ -1679,7 +1679,8 @@ QDF_STATUS lim_populate_peer_rate_set(struct mac_context *mac,
 				      uint8_t basicOnly,
 				      struct pe_session *pe_session,
 				      tDot11fIEVHTCaps *pVHTCaps,
-				      tDot11fIEhe_cap *he_caps)
+				      tDot11fIEhe_cap *he_caps,
+				      struct bss_description *bss_desc)
 {
 	tSirMacRateSet tempRateSet;
 	tSirMacRateSet tempRateSet2;
@@ -1687,8 +1688,6 @@ QDF_STATUS lim_populate_peer_rate_set(struct mac_context *mac,
 	qdf_size_t val_len;
 	tDot11fIEhe_cap *peer_he_caps;
 	tSchBeaconStruct *pBeaconStruct = NULL;
-	struct bss_description *bssDescription =
-		&pe_session->lim_join_req->bssDescription;
 
 	/* copy operational rate set from pe_session */
 	if (pe_session->rateSet.numRates <= WLAN_SUPPORTED_RATES_IE_MAX_LEN) {
@@ -1818,14 +1817,17 @@ QDF_STATUS lim_populate_peer_rate_set(struct mac_context *mac,
 	if (lim_check_valid_mcs_for_nss(pe_session, he_caps)) {
 		peer_he_caps = he_caps;
 	} else {
-		bssDescription = &pe_session->lim_join_req->bssDescription;
+		if (!bss_desc) {
+			pe_err("bssDescription is NULL");
+			return QDF_STATUS_E_INVAL;
+		}
 		pBeaconStruct = qdf_mem_malloc(sizeof(tSchBeaconStruct));
 		if (!pBeaconStruct)
 			return QDF_STATUS_E_NOMEM;
-		lim_extract_ap_capabilities(mac,
-				(uint8_t *)bssDescription->ieFields,
-				lim_get_ielen_from_bss_description(
-					bssDescription),
+
+		lim_extract_ap_capabilities(
+				mac, (uint8_t *)bss_desc->ieFields,
+				lim_get_ielen_from_bss_description(bss_desc),
 				pBeaconStruct);
 		peer_he_caps = &pBeaconStruct->he_cap;
 	}
@@ -1835,7 +1837,7 @@ QDF_STATUS lim_populate_peer_rate_set(struct mac_context *mac,
 
 	if (IS_DOT11_MODE_HE(pe_session->dot11mode) && he_caps) {
 		lim_calculate_he_nss(pRates, pe_session);
-	} else if (IS_DOT11_MODE_VHT(pe_session->dot11mode)) {
+	} else if (pe_session->vhtCapability) {
 		if ((pRates->vhtRxMCSMap & MCSMAPMASK2x2) == MCSMAPMASK2x2)
 			pe_session->nss = NSS_1x1_MODE;
 	} else if (pRates->supportedMCSSet[1] == 0) {
@@ -2904,7 +2906,7 @@ lim_add_sta_self(struct mac_context *mac, uint16_t staIdx, uint8_t updateSta,
 		pAddStaParams->fShortGI20Mhz = pe_session->ht_config.ht_sgi20;
 		pAddStaParams->fShortGI40Mhz = pe_session->ht_config.ht_sgi40;
 	}
-	pAddStaParams->vhtCapable = IS_DOT11_MODE_VHT(selfStaDot11Mode);
+	pAddStaParams->vhtCapable = pe_session->vhtCapability;
 	if (pAddStaParams->vhtCapable)
 		pAddStaParams->ch_width =
 			pe_session->ch_width;
@@ -2915,7 +2917,7 @@ lim_add_sta_self(struct mac_context *mac, uint16_t staIdx, uint8_t updateSta,
 		pe_session->vht_config.su_beam_former;
 
 	/* In 11ac mode, the hardware is capable of supporting 128K AMPDU size */
-	if (IS_DOT11_MODE_VHT(selfStaDot11Mode))
+	if (pe_session->vhtCapability)
 		pAddStaParams->maxAmpduSize =
 		mac->mlme_cfg->vht_caps.vht_cap_info.ampdu_len_exponent;
 
@@ -3294,7 +3296,7 @@ lim_check_and_announce_join_success(struct mac_context *mac_ctx,
 	lim_post_sme_message(mac_ctx, LIM_MLM_JOIN_CNF,
 			     (uint32_t *) &mlm_join_cnf);
 
-	if ((IS_DOT11_MODE_VHT(session_entry->dot11mode)) &&
+	if (session_entry->vhtCapability &&
 		beacon_probe_rsp->vendor_vht_ie.VHTCaps.present) {
 		session_entry->is_vendor_specific_vhtcaps = true;
 		session_entry->vendor_specific_vht_ie_sub_type =
@@ -3458,9 +3460,10 @@ lim_del_bss(struct mac_context *mac, tpDphHashNode sta, uint16_t bss_idx,
  *
  * Return : void
  */
-static void lim_update_vhtcaps_assoc_resp(struct mac_context *mac_ctx,
-		tpAddBssParams pAddBssParams,
-		tDot11fIEVHTCaps *vht_caps, struct pe_session *pe_session)
+void lim_update_vhtcaps_assoc_resp(struct mac_context *mac_ctx,
+				   tpAddBssParams pAddBssParams,
+				   tDot11fIEVHTCaps *vht_caps,
+				   struct pe_session *pe_session)
 {
 	pAddBssParams->staContext.vht_caps =
 		((vht_caps->maxMPDULen <<
@@ -4023,10 +4026,15 @@ QDF_STATUS lim_sta_send_add_bss_pre_assoc(struct mac_context *mac, uint8_t updat
 	tDot11fIEVHTOperation *vht_oper = NULL;
 	tDot11fIEVHTCaps *vht_caps = NULL;
 	uint32_t listen_interval = MLME_CFG_LISTEN_INTERVAL;
-	struct bss_description *bssDescription =
-		&pe_session->lim_join_req->bssDescription;
+	struct bss_description *bssDescription = NULL;
 	struct mlme_vht_capabilities_info *vht_cap_info;
 
+	if (!pe_session->lim_join_req) {
+		pe_err("Lim Join request is NULL");
+		return QDF_STATUS_E_FAILURE;
+	}
+
+	bssDescription = &pe_session->lim_join_req->bssDescription;
 	vht_cap_info = &mac->mlme_cfg->vht_caps.vht_cap_info;
 
 	pBeaconStruct = qdf_mem_malloc(sizeof(tSchBeaconStruct));
@@ -4333,7 +4341,8 @@ QDF_STATUS lim_sta_send_add_bss_pre_assoc(struct mac_context *mac, uint8_t updat
 			pBeaconStruct->HTCaps.supportedMCSSet,
 			false, pe_session,
 			&pBeaconStruct->VHTCaps,
-			&pBeaconStruct->he_cap);
+			&pBeaconStruct->he_cap,
+			bssDescription);
 
 	pAddBssParams->staContext.encryptType = pe_session->encryptType;
 

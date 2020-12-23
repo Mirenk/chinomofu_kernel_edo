@@ -22,7 +22,7 @@
 #include <cds_sched.h>
 
 /* Timeout in ms to wait for a DP rx thread */
-#define DP_RX_THREAD_WAIT_TIMEOUT 200
+#define DP_RX_THREAD_WAIT_TIMEOUT 1000
 
 #define DP_RX_TM_DEBUG 0
 #if DP_RX_TM_DEBUG
@@ -39,7 +39,7 @@ static inline void dp_rx_tm_walk_skb_list(qdf_nbuf_t nbuf_list)
 
 	nbuf = nbuf_list;
 	while (nbuf) {
-		dp_debug("%d nbuf:%pk nbuf->next:%pK nbuf->data:%pk ", i,
+		dp_debug("%d nbuf:%pK nbuf->next:%pK nbuf->data:%pK", i,
 			 nbuf, qdf_nbuf_next(nbuf), qdf_nbuf_data(nbuf));
 		nbuf = qdf_nbuf_next(nbuf);
 		i++;
@@ -358,16 +358,17 @@ static int dp_rx_thread_process_nbufq(struct dp_rx_thread *rx_thread)
 		}
 		cdp_get_os_rx_handles_from_vdev(soc, vdev, &stack_fn,
 						&osif_vdev);
-		if (!stack_fn || !osif_vdev) {
+		dp_debug("rx_thread %pK sending packet %pK to stack", rx_thread,
+			 nbuf_list);
+		if (!stack_fn || !osif_vdev ||
+		    QDF_STATUS_SUCCESS != stack_fn(osif_vdev, nbuf_list)) {
 			rx_thread->stats.dropped_invalid_os_rx_handles +=
 							num_list_elements;
 			qdf_nbuf_list_free(nbuf_list);
-			goto dequeue_rx_thread;
+		} else {
+			rx_thread->stats.nbuf_sent_to_stack +=
+							num_list_elements;
 		}
-		dp_debug("rx_thread %pK sending packet %pK to stack", rx_thread,
-			 nbuf_list);
-		stack_fn(osif_vdev, nbuf_list);
-		rx_thread->stats.nbuf_sent_to_stack += num_list_elements;
 
 dequeue_rx_thread:
 		nbuf_list = dp_rx_tm_thread_dequeue(rx_thread);
@@ -772,6 +773,7 @@ void dp_rx_thread_flush_by_vdev_id(struct dp_rx_thread *rx_thread,
 	}
 	qdf_nbuf_queue_head_unlock(&rx_thread->nbuf_queue);
 
+	qdf_event_reset(&rx_thread->vdev_del_event);
 	qdf_set_bit(RX_VDEV_DEL_EVENT, &rx_thread->event_flag);
 	qdf_wake_up_interruptible(&rx_thread->wait_q);
 

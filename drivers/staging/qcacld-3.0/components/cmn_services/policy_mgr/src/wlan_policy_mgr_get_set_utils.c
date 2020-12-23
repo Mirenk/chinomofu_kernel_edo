@@ -34,6 +34,7 @@
 #include "wlan_objmgr_vdev_obj.h"
 #include "wlan_nan_api.h"
 #include "nan_public_structs.h"
+#include "wlan_mlme_vdev_mgr_interface.h"
 #include "wlan_reg_services_api.h"
 
 /* invalid channel id. */
@@ -2066,11 +2067,15 @@ static bool policy_mgr_is_sub_20_mhz_enabled(struct wlan_objmgr_psoc *psoc)
 static bool policy_mgr_check_privacy_for_new_conn(
 	struct policy_mgr_psoc_priv_obj *pm_ctx)
 {
-	if (!pm_ctx->hdd_cbacks.hdd_wapi_security_sta_exist)
-		return true;
+	struct wlan_objmgr_pdev *pdev = pm_ctx->pdev;
 
-	if (pm_ctx->hdd_cbacks.hdd_wapi_security_sta_exist() &&
-	    (policy_mgr_get_connection_count(pm_ctx->psoc) > 0))
+	if (!pdev) {
+		policy_mgr_debug("pdev is Null");
+		return true;
+	}
+
+	if (mlme_is_wapi_sta_active(pdev) &&
+	    policy_mgr_get_connection_count(pm_ctx->psoc) > 0)
 		return false;
 
 	return true;
@@ -2086,6 +2091,7 @@ bool policy_mgr_is_concurrency_allowed(struct wlan_objmgr_psoc *psoc,
 	uint32_t list[MAX_NUMBER_OF_CONC_CONNECTIONS];
 	struct policy_mgr_psoc_priv_obj *pm_ctx;
 	bool sta_sap_scc_on_dfs_chan;
+	bool go_force_scc;
 	uint8_t chan;
 
 	pm_ctx = policy_mgr_get_context(psoc);
@@ -2133,9 +2139,9 @@ bool policy_mgr_is_concurrency_allowed(struct wlan_objmgr_psoc *psoc,
 
 		sta_sap_scc_on_dfs_chan =
 			policy_mgr_is_sta_sap_scc_allowed_on_dfs_chan(psoc);
-
-		if (!sta_sap_scc_on_dfs_chan && ((mode == PM_P2P_GO_MODE) ||
-		    (mode == PM_SAP_MODE))) {
+		go_force_scc = policy_mgr_go_scc_enforced(psoc);
+		if ((!sta_sap_scc_on_dfs_chan && mode == PM_SAP_MODE) ||
+		    (!go_force_scc && mode == PM_P2P_GO_MODE)) {
 			if (wlan_reg_is_dfs_ch(pm_ctx->pdev, channel))
 				match = policy_mgr_disallow_mcc(psoc, channel);
 		}
@@ -3612,13 +3618,13 @@ void policy_mgr_trim_acs_channel_list(uint8_t *pcl, uint8_t pcl_count,
 {
 	uint16_t i, j, ch_list_count = 0;
 
-	if (*org_ch_list_count >= QDF_MAX_NUM_CHAN) {
+	if (*org_ch_list_count >= NUM_CHANNELS) {
 		policy_mgr_err("org_ch_list_count too big %d",
 			*org_ch_list_count);
 		return;
 	}
 
-	if (pcl_count >= QDF_MAX_NUM_CHAN) {
+	if (pcl_count >= NUM_CHANNELS) {
 		policy_mgr_err("pcl_count is too big %d",
 			       pcl_count);
 		return;

@@ -695,13 +695,25 @@ sap_chan_bond_dfs_sub_chan(struct sap_context *sap_context,
 	return false;
 }
 
-uint8_t sap_select_default_oper_chan(struct sap_acs_cfg *acs_cfg)
+uint8_t sap_select_default_oper_chan(struct mac_context *mac_ctx,
+				     struct sap_acs_cfg *acs_cfg)
 {
 	uint16_t i;
+	uint8_t chan0 = 0, chan1 = 0, chan2 = 0, default_chan;
 
-	if (!acs_cfg || !acs_cfg->ch_list || !acs_cfg->ch_list_count)
+	if (!acs_cfg)
 		return 0;
 
+	if (!acs_cfg->ch_list_count || !acs_cfg->ch_list) {
+		if (mac_ctx->mlme_cfg->acs.force_sap_start) {
+			sap_debug("SAP forced, ch selected %d",
+				  acs_cfg->master_ch_list[0]);
+			return acs_cfg->master_ch_list[0];
+		} else {
+			sap_debug("No channel left for operation");
+			return 0;
+		}
+	}
 	/*
 	 * There could be both 2.4Ghz and 5ghz channels present in the list
 	 * based upon the Hw mode received from hostapd, it is always better
@@ -710,19 +722,36 @@ uint8_t sap_select_default_oper_chan(struct sap_acs_cfg *acs_cfg)
 	 * rare in 2.4ghz band, so 5ghz should be preferred. If we get a 5Ghz
 	 * chan in the acs cfg ch list , we should go for that first else the
 	 * default channel can be 2.4ghz.
+	 * Add check regulatory channel state before select the channel.
 	 */
 
 	for (i = 0; i < acs_cfg->ch_list_count; i++) {
-		if (WLAN_CHAN_IS_5GHZ(acs_cfg->ch_list[i])) {
-			sap_debug("default channel chosen as %d",
-				  acs_cfg->ch_list[i]);
-			return acs_cfg->ch_list[i];
+		enum channel_state state =
+			wlan_reg_get_channel_state(
+					mac_ctx->pdev, acs_cfg->ch_list[i]);
+		if (!chan0 && state == CHANNEL_STATE_ENABLE &&
+		    WLAN_CHAN_IS_5GHZ(acs_cfg->ch_list[i])) {
+			chan0 = acs_cfg->ch_list[i];
+			break;
+		} else if (!chan1 && state == CHANNEL_STATE_DFS &&
+			   WLAN_CHAN_IS_5GHZ(acs_cfg->ch_list[i])) {
+			chan1 = acs_cfg->ch_list[i];
+		} else if (!chan2 && state == CHANNEL_STATE_ENABLE) {
+			chan2 = acs_cfg->ch_list[i];
 		}
 	}
+	default_chan = chan0;
+	if (!default_chan)
+		default_chan = chan1;
+	if (!default_chan)
+		default_chan = chan2;
+	if (!default_chan)
+		default_chan = acs_cfg->ch_list[0];
 
-	sap_debug("default channel chosen as %d", acs_cfg->ch_list[0]);
+	sap_debug("default chan %d chosen from %d %d %d %d", default_chan,
+		  chan0, chan1, chan2, acs_cfg->ch_list[0]);
 
-	return acs_cfg->ch_list[0];
+	return default_chan;
 }
 
 QDF_STATUS
@@ -1052,7 +1081,7 @@ QDF_STATUS sap_channel_sel(struct sap_context *sap_context)
 				  FL("SAP Configuring default channel, Ch=%d"),
 				  sap_context->channel);
 			sap_context->channel = sap_select_default_oper_chan(
-					sap_context->acs_cfg);
+					       mac_ctx, sap_context->acs_cfg);
 
 			if (sap_context->channelList) {
 				sap_context->channel =
@@ -3375,6 +3404,13 @@ static QDF_STATUS sap_get_channel_list(struct sap_context *sap_ctx,
 						WLAN_REG_CH_NUM(loop_count)))
 			continue;
 
+		if (wlan_reg_is_dfs_ch(mac_ctx->pdev,
+		    WLAN_REG_CH_NUM(loop_count)) &&
+		    !MLME_GET_DFS_CHAN_WEIGHT(
+		    mac_ctx->mlme_cfg->acs.np_chan_weightage)) {
+			sap_debug("DFS ch with np weight 0, skipping");
+			continue;
+		}
 #ifdef FEATURE_WLAN_AP_AP_ACS_OPTIMIZE
 		uint8_t ch;
 

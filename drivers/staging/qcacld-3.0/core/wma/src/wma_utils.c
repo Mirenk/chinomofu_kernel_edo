@@ -64,6 +64,7 @@
 #include "host_diag_core_log.h"
 #include <wlan_mlme_api.h>
 #include "cdp_txrx_misc.h"
+#include <cdp_txrx_host_stats.h>
 
 /* MCS Based rate table */
 /* HT MCS parameters with Nss = 1 */
@@ -1608,6 +1609,10 @@ static int wma_unified_link_peer_stats_event_handler(void *handle,
 	size_t link_stats_results_size;
 	bool excess_data = false;
 	uint32_t buf_len = 0;
+	struct cdp_peer_stats *dp_stats = NULL;
+	void *dp_soc = cds_get_context(QDF_MODULE_ID_SOC);
+	uint8_t mcs_index;
+	QDF_STATUS status;
 
 	struct mac_context *mac = cds_get_context(QDF_MODULE_ID_PE);
 
@@ -1706,6 +1711,13 @@ static int wma_unified_link_peer_stats_event_handler(void *handle,
 	qdf_mem_copy(link_stats_results->results,
 		     &fixed_param->num_peers, peer_stats_size);
 
+	dp_stats = qdf_mem_malloc(sizeof(*dp_stats));
+	if (!dp_stats) {
+		wma_err("dp stats allocation failed");
+		qdf_mem_free(link_stats_results);
+		return -ENOMEM;
+	}
+
 	results = (uint8_t *) link_stats_results->results;
 	t_peer_stats = (uint8_t *) peer_stats;
 	t_rate_stats = (uint8_t *) rate_stats;
@@ -1717,8 +1729,20 @@ static int wma_unified_link_peer_stats_event_handler(void *handle,
 			     t_peer_stats + next_peer_offset, peer_info_size);
 		next_res_offset += peer_info_size;
 
+		status = cdp_host_get_peer_stats(dp_soc,
+				       link_stats_results->ifaceId,
+				       (uint8_t *)&peer_stats->peer_mac_address,
+				       dp_stats);
 		/* Copy rate stats associated with this peer */
 		for (count = 0; count < peer_stats->num_rates; count++) {
+			mcs_index = RATE_STAT_GET_MCS_INDEX(rate_stats->rate);
+			if (QDF_IS_STATUS_SUCCESS(status)) {
+				if (rate_stats->rate && mcs_index < MAX_MCS)
+					rate_stats->rx_mpdu =
+					    dp_stats->rx.rx_mpdu_cnt[mcs_index];
+				else
+					rate_stats->rx_mpdu = 0;
+			}
 			rate_stats++;
 
 			qdf_mem_copy(results + next_res_offset,
@@ -1731,6 +1755,7 @@ static int wma_unified_link_peer_stats_event_handler(void *handle,
 		peer_stats++;
 	}
 
+	qdf_mem_free(dp_stats);
 	/* call hdd callback with Link Layer Statistics
 	 * vdev_id/ifacId in link_stats_results will be
 	 * used to retrieve the correct HDD context
@@ -3214,6 +3239,11 @@ int wma_link_status_event_handler(void *handle, uint8_t *cmd_param_info,
 						param_buf->fixed_param;
 	ht_info = (wmi_vdev_rate_ht_info *) param_buf->ht_info;
 
+	if (!ht_info) {
+		wma_err("Invalid ht_info");
+		return -EINVAL;
+	}
+
 	WMA_LOGD("num_vdev_stats: %d", event->num_vdev_stats);
 
 	if (event->num_vdev_stats > ((WMI_SVC_MSG_MAX_SIZE -
@@ -3940,7 +3970,7 @@ WLAN_PHY_MODE wma_peer_phymode(tSirNwType nw_type, uint8_t sta_type,
 			else
 				phymode = (CH_WIDTH_40MHZ == ch_width) ?
 					  MODE_11AC_VHT40 :
-					  MODE_11AC_VHT20;
+					  MODE_11AC_VHT20_2G;
 		} else if (is_ht) {
 			phymode = (CH_WIDTH_40MHZ == ch_width) ?
 				  MODE_11NG_HT40 : MODE_11NG_HT20;

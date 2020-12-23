@@ -801,7 +801,7 @@ struct wma_txrx_node {
 	bool vdev_active;
 	uint64_t tsfadjust;
 	void *addBssStaContext;
-	uint8_t aid;
+	uint16_t aid;
 	uint8_t rmfEnabled;
 #ifdef WLAN_FEATURE_11W
 	wma_igtk_key_t key;
@@ -906,7 +906,7 @@ struct wma_ini_config {
  */
 struct wma_valid_channels {
 	uint8_t num_channels;
-	uint8_t channel_list[MAX_NUM_CHAN];
+	uint8_t channel_list[NUM_CHANNELS];
 };
 
 #ifdef FEATURE_WLM_STATS

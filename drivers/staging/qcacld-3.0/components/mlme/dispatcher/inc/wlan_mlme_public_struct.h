@@ -1176,20 +1176,26 @@ struct wlan_mlme_product_details_cfg {
 	char manufacture_product_version[WLAN_CFG_MFR_PRODUCT_VERSION_LEN + 1];
 };
 
+#define MLME_GET_DFS_CHAN_WEIGHT(np_chan_weight) (np_chan_weight & 0x000000FF)
+
 /*
  * struct wlan_mlme_acs - All acs related cfg items
  * @is_acs_with_more_param - to enable acs with more param
  * @auto_channel_select_weight - to set acs channel weight
  * @is_vendor_acs_support - enable application based channel selection
  * @is_acs_support_for_dfs_ltecoex - enable channel for dfs and lte coex
+ * @np_chan_weightage: Weightage to be given to non preferred channels.
  * @is_external_acs_policy - control external policy
+ * @force_sap_start: Force SAP start when no channel is found suitable
  */
 struct wlan_mlme_acs {
 	bool is_acs_with_more_param;
 	uint32_t auto_channel_select_weight;
 	bool is_vendor_acs_support;
 	bool is_acs_support_for_dfs_ltecoex;
+	uint32_t np_chan_weightage;
 	bool is_external_acs_policy;
+	bool force_sap_start;
 };
 
 /*
@@ -1389,6 +1395,7 @@ struct bss_load_trigger {
  * @mawc_roam_enabled:              Enable/Disable MAWC during roaming
  * @enable_fast_roam_in_concurrency:Enable LFR roaming on STA during concurrency
  * @lfr3_roaming_offload:           Enable/disable roam offload feature
+ * @enable_self_bss_roam:               enable roaming to connected BSSID
  * @enable_disconnect_roam_offload: enable disassoc/deauth roam scan.
  * @enable_idle_roam: flag to enable/disable idle roam in fw
  * @idle_roam_rssi_delta: rssi delta of connected ap which is used to
@@ -1423,6 +1430,10 @@ struct bss_load_trigger {
  * @roam_bg_scan_bad_rssi_threshold:RSSI threshold for background roam
  * @roam_bg_scan_client_bitmap:     Bitmap used to identify the scan clients
  * @roam_bg_scan_bad_rssi_offset_2g:RSSI threshold offset for 2G to 5G roam
+ * @roam_data_rssi_threshold_triggers: triggers of bad data RSSI threshold to
+ *                                  roam
+ * @roam_data_rssi_threshold: Bad data RSSI threshold to roam
+ * @rx_data_inactivity_time: Rx duration to check data RSSI
  * @adaptive_roamscan_dwell_mode:   Sets dwell time adaptive mode
  * @per_roam_enable:                To enabled/disable PER based roaming in FW
  * @per_roam_config_high_rate_th:   Rate at which PER based roam will stop
@@ -1496,6 +1507,7 @@ struct wlan_mlme_lfr_cfg {
 	bool enable_fast_roam_in_concurrency;
 #ifdef WLAN_FEATURE_ROAM_OFFLOAD
 	bool lfr3_roaming_offload;
+	bool enable_self_bss_roam;
 	bool enable_disconnect_roam_offload;
 	bool enable_idle_roam;
 	uint32_t idle_roam_rssi_delta;
@@ -1530,6 +1542,9 @@ struct wlan_mlme_lfr_cfg {
 	uint32_t roam_bg_scan_bad_rssi_threshold;
 	uint32_t roam_bg_scan_client_bitmap;
 	uint32_t roam_bg_scan_bad_rssi_offset_2g;
+	uint32_t roam_data_rssi_threshold_triggers;
+	int32_t roam_data_rssi_threshold;
+	uint32_t rx_data_inactivity_time;
 	uint32_t adaptive_roamscan_dwell_mode;
 	uint32_t per_roam_enable;
 	uint32_t per_roam_config_high_rate_th;

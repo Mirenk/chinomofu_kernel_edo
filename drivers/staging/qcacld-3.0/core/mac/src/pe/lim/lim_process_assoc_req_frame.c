@@ -826,6 +826,24 @@ static void lim_print_ht_cap(struct mac_context *mac_ctx, struct pe_session *ses
 }
 
 #ifdef WLAN_CONV_CRYPTO_IE_SUPPORT
+
+static enum mac_status_code
+lim_check_crypto_param(tpSirAssocReq assoc_req,
+		       struct wlan_crypto_params *peer_crypto_params)
+{
+	/* TKIP/WEP is not allowed in HT/VHT mode*/
+	if (assoc_req->HTCaps.present) {
+		if ((peer_crypto_params->ucastcipherset &
+			(1 << WLAN_CRYPTO_CIPHER_TKIP)) ||
+		    (peer_crypto_params->ucastcipherset &
+			(1 << WLAN_CRYPTO_CIPHER_WEP))) {
+			pe_info("TKIP/WEP cipher with HT supported client, reject assoc");
+			return eSIR_MAC_INVALID_IE_STATUS;
+		}
+	}
+	return eSIR_MAC_SUCCESS_STATUS;
+}
+
 static
 enum mac_status_code lim_check_rsn_ie(struct pe_session *session,
 				      struct mac_context *mac_ctx,
@@ -838,6 +856,7 @@ enum mac_status_code lim_check_rsn_ie(struct pe_session *session,
 	uint8_t buffer[WLAN_MAX_IE_LEN];
 	uint32_t dot11f_status, written = 0, nbuffer = WLAN_MAX_IE_LEN;
 	tSirMacRsnInfo rsn_ie;
+	struct wlan_crypto_params peer_crypto_params;
 
 	dot11f_status = dot11f_pack_ie_rsn(mac_ctx, rsn, buffer,
 					   nbuffer, &written);
@@ -849,7 +868,8 @@ enum mac_status_code lim_check_rsn_ie(struct pe_session *session,
 	rsn_ie.length = (uint8_t) written;
 	qdf_mem_copy(&rsn_ie.info[0], buffer, rsn_ie.length);
 	if (wlan_crypto_check_rsn_match(mac_ctx->psoc, session->smeSessionId,
-					&rsn_ie.info[0], rsn_ie.length)) {
+					&rsn_ie.info[0], rsn_ie.length,
+					&peer_crypto_params)) {
 		vdev = wlan_objmgr_get_vdev_by_id_from_psoc(mac_ctx->psoc,
 							session->smeSessionId,
 							WLAN_LEGACY_MAC_ID);
@@ -860,6 +880,8 @@ enum mac_status_code lim_check_rsn_ie(struct pe_session *session,
 
 		*pmf_connection = wlan_crypto_vdev_is_pmf_enabled(vdev);
 		wlan_objmgr_vdev_release_ref(vdev, WLAN_LEGACY_MAC_ID);
+		return lim_check_crypto_param(assoc_req, &peer_crypto_params);
+
 	} else {
 		return eSIR_MAC_INVALID_IE_STATUS;
 	}
@@ -875,6 +897,7 @@ static enum mac_status_code lim_check_wpa_ie(struct pe_session *session,
 	uint8_t buffer[WLAN_MAX_IE_LEN];
 	uint32_t dot11f_status, written = 0, nbuffer = WLAN_MAX_IE_LEN;
 	tSirMacRsnInfo wpa_ie = {0};
+	struct wlan_crypto_params peer_crypto_params;
 
 	dot11f_status = dot11f_pack_ie_wpa(mac_ctx, wpa, buffer,
 					   nbuffer, &written);
@@ -886,8 +909,10 @@ static enum mac_status_code lim_check_wpa_ie(struct pe_session *session,
 	wpa_ie.length = (uint8_t) written;
 	qdf_mem_copy(&wpa_ie.info[0], buffer, wpa_ie.length);
 	if (wlan_crypto_check_wpa_match(mac_ctx->psoc, session->smeSessionId,
-					&wpa_ie.info[0], wpa_ie.length))
-		return eSIR_MAC_SUCCESS_STATUS;
+					&wpa_ie.info[0], wpa_ie.length,
+					&peer_crypto_params)) {
+		return lim_check_crypto_param(assoc_req, &peer_crypto_params);
+	}
 
 	return eSIR_MAC_INVALID_IE_STATUS;
 }
@@ -1605,8 +1630,6 @@ static bool lim_update_sta_ds(struct mac_context *mac_ctx, tpSirMacMgmtHdr hdr,
 					== eHT_CHANNEL_WIDTH_20MHZ) ?
 					WNI_CFG_VHT_CHANNEL_WIDTH_20_40MHZ :
 					session->ch_width - 1);
-			sta_ds->htMaxRxAMpduFactor =
-				vht_caps->maxAMPDULenExp;
 		}
 		/* Lesser among the AP and STA bandwidth of operation. */
 		sta_ds->htSupportedChannelWidthSet =
@@ -1642,6 +1665,8 @@ static bool lim_update_sta_ds(struct mac_context *mac_ctx, tpSirMacMgmtHdr hdr,
 	}
 
 	if (sta_ds->mlmStaContext.vhtCapability && vht_caps) {
+		sta_ds->htMaxRxAMpduFactor =
+				vht_caps->maxAMPDULenExp;
 		if (session->vht_config.su_beam_formee &&
 				vht_caps->suBeamFormerCap)
 			sta_ds->vhtBeamFormerCapable = 1;
@@ -2136,6 +2161,43 @@ send_ind_to_sme:
 }
 
 /**
+ * lim_peer_present_on_any_sta() - Check if Same MAC is connected with STA, i.e.
+ * duplicate mac detection.
+ * @mac_ctx: Pointer to Global MAC structure
+ * @peer_addr: peer address to check
+ *
+ * This function will return true if a peer STA and AP are using same mac
+ * address.
+ *
+ * @Return: bool
+ */
+static bool
+lim_peer_present_on_any_sta(struct mac_context *mac_ctx, uint8_t *peer_addr)
+{
+	struct wlan_objmgr_peer *peer;
+	bool sta_peer_present = false;
+	enum QDF_OPMODE mode;
+	uint8_t peer_vdev_id;
+
+	peer = wlan_objmgr_get_peer_by_mac(mac_ctx->psoc, peer_addr,
+					   WLAN_LEGACY_MAC_ID);
+	if (!peer)
+		return sta_peer_present;
+
+	peer_vdev_id = wlan_vdev_get_id(wlan_peer_get_vdev(peer));
+	mode = wlan_vdev_mlme_get_opmode(wlan_peer_get_vdev(peer));
+	if (mode == QDF_STA_MODE || mode == QDF_P2P_CLIENT_MODE) {
+		pe_debug("duplicate mac detected!!! Peer " QDF_MAC_ADDR_STR " present on STA vdev %d",
+			 QDF_MAC_ADDR_ARRAY(peer_addr), peer_vdev_id);
+		sta_peer_present = true;
+	}
+
+	wlan_objmgr_peer_release_ref(peer, WLAN_LEGACY_MAC_ID);
+
+	return sta_peer_present;
+}
+
+/**
  * lim_process_assoc_req_frame() - Process RE/ASSOC Request frame.
  * @mac_ctx: Pointer to Global MAC structure
  * @rx_pkt_info: A pointer to Buffer descriptor + associated PDUs
@@ -2163,6 +2225,7 @@ void lim_process_assoc_req_frame(struct mac_context *mac_ctx, uint8_t *rx_pkt_in
 	tpDphHashNode sta_ds = NULL;
 	tpSirAssocReq assoc_req;
 	bool dup_entry = false;
+	struct wlan_objmgr_vdev *vdev;
 	QDF_STATUS status;
 
 	lim_get_phy_mode(mac_ctx, &phy_mode, session);
@@ -2198,6 +2261,26 @@ void lim_process_assoc_req_frame(struct mac_context *mac_ctx, uint8_t *rx_pkt_in
 			eLIM_MLM_WT_DEL_BSS_RSP_STATE);
 		return;
 	}
+
+	vdev = session->vdev;
+	if (!vdev) {
+		pe_err("vdev is NULL");
+		return;
+	}
+
+	if (wlan_vdev_mlme_get_state(vdev) != WLAN_VDEV_S_UP) {
+		pe_err("SAP is not up, drop ASSOC REQ on sessionid: %d",
+		       session->peSessionId);
+		return;
+	}
+
+	if (lim_peer_present_on_any_sta(mac_ctx, hdr->sa))
+		/*
+		 * This mean a AP and STA have same mac address and device STA
+		 * is already connected to the AP, and STA is now trying to
+		 * connect to device SAP. So ignore association.
+		 */
+		return;
 
 	/*
 	 * If a STA is already present in DPH and it is initiating a Assoc

@@ -178,7 +178,6 @@ static void mlm_add_sta(struct mac_context *mac_ctx, tpAddStaParams sta_param,
 		uint8_t *bssid, uint8_t ht_capable, struct pe_session *session_entry)
 {
 	uint32_t val;
-	uint32_t self_dot11mode = mac_ctx->mlme_cfg->dot11_mode.dot11_mode;
 
 	sta_param->staType = STA_ENTRY_SELF; /* Identifying self */
 
@@ -260,7 +259,7 @@ static void mlm_add_sta(struct mac_context *mac_ctx, tpAddStaParams sta_param,
 	 * Since this is Self-STA, need to populate Self MAX_AMPDU_SIZE
 	 * capabilities
 	 */
-	if (IS_DOT11_MODE_VHT(self_dot11mode)) {
+	if (session_entry->vhtCapability) {
 		sta_param->maxAmpduSize =
 		mac_ctx->mlme_cfg->vht_caps.vht_cap_info.ampdu_len_exponent;
 	}
@@ -1250,17 +1249,6 @@ lim_process_mlm_disassoc_req_ntf(struct mac_context *mac_ctx,
 
 		}
 		break;
-	case eLIM_STA_IN_IBSS_ROLE:
-		break;
-	case eLIM_AP_ROLE:
-	case eLIM_P2P_DEVICE_GO:
-		if (true ==
-			 mac_ctx->sap.SapDfsInfo.is_dfs_cac_timer_running) {
-			pe_err("CAC timer is running, drop disassoc from going out");
-			mlm_disassoccnf.resultCode = eSIR_SME_SUCCESS;
-			goto end;
-		}
-		break;
 	default:
 		break;
 	} /* end switch (GET_LIM_SYSTEM_ROLE(session)) */
@@ -1625,16 +1613,6 @@ lim_process_mlm_deauth_req_ntf(struct mac_context *mac_ctx,
 		pe_err("received MLM_DEAUTH_REQ IBSS Mode");
 		mlm_deauth_cnf.resultCode = eSIR_SME_INVALID_PARAMETERS;
 		goto end;
-	case eLIM_AP_ROLE:
-	case eLIM_P2P_DEVICE_GO:
-		if (true ==
-			mac_ctx->sap.SapDfsInfo.is_dfs_cac_timer_running) {
-			pe_err("CAC timer is running, drop disassoc from going out");
-			mlm_deauth_cnf.resultCode = eSIR_SME_SUCCESS;
-			goto end;
-		}
-		break;
-
 	default:
 		break;
 	} /* end switch (GET_LIM_SYSTEM_ROLE(session)) */
@@ -2084,6 +2062,36 @@ static void lim_process_periodic_join_probe_req_timer(struct mac_context *mac_ct
 	}
 }
 
+static void lim_handle_sae_auth_timeout(struct mac_context *mac_ctx,
+					struct pe_session *session_entry)
+{
+	struct sae_auth_retry *sae_retry;
+
+	sae_retry = mlme_get_sae_auth_retry(session_entry->vdev);
+	if (!(sae_retry && sae_retry->sae_auth.data)) {
+		pe_debug("sae auth frame is not buffered vdev id %d",
+			 session_entry->vdev_id);
+		return;
+	}
+
+	pe_debug("retry sae auth for seq num %d vdev id %d",
+		 mac_ctx->mgmtSeqNum, session_entry->vdev_id);
+	lim_send_frame(mac_ctx, session_entry->vdev_id,
+		       sae_retry->sae_auth.data, sae_retry->sae_auth.len);
+
+	sae_retry->sae_auth_max_retry--;
+	/* Activate Auth Retry timer if max_retries are not done */
+	if (!sae_retry->sae_auth_max_retry || (tx_timer_activate(
+	    &mac_ctx->lim.limTimers.g_lim_periodic_auth_retry_timer) !=
+	    TX_SUCCESS))
+		goto free_and_deactivate_timer;
+
+	return;
+
+free_and_deactivate_timer:
+	lim_sae_auth_cleanup_retry(mac_ctx, session_entry->vdev_id);
+}
+
 /**
  * lim_process_auth_retry_timer()- function to Retry Auth when auth timeout
  * occurs
@@ -2096,15 +2104,19 @@ static void lim_process_auth_retry_timer(struct mac_context *mac_ctx)
 	struct pe_session *session_entry;
 	tAniAuthType auth_type;
 	tLimTimers *lim_timers = &mac_ctx->lim.limTimers;
-	uint16_t vdev_id =
+	uint16_t pe_session_id =
 		lim_timers->g_lim_periodic_auth_retry_timer.sessionId;
 
-	session_entry = pe_find_session_by_session_id(mac_ctx, vdev_id);
+	session_entry = pe_find_session_by_session_id(mac_ctx, pe_session_id);
 	if (!session_entry) {
-		pe_err("session does not exist for vdev_id: %d", vdev_id);
+		pe_err("session does not exist for vdev_id: %d",
+		       pe_session_id);
 		return;
 	}
 
+	/** For WPA3 SAE gLimAuthFailureTimer is not running hence
+	 *  we don't enter in below "if" block in case of wpa3 sae
+	 */
 	if (tx_timer_running(&mac_ctx->lim.limTimers.gLimAuthFailureTimer) &&
 	    (session_entry->limMlmState == eLIM_MLM_WT_AUTH_FRAME2_STATE) &&
 	     (LIM_AUTH_ACK_RCD_SUCCESS != mac_ctx->auth_ack_status)) {
@@ -2141,12 +2153,14 @@ static void lim_process_auth_retry_timer(struct mac_context *mac_ctx)
 		/* Activate Auth Retry timer */
 		if (tx_timer_activate
 		     (&mac_ctx->lim.limTimers.g_lim_periodic_auth_retry_timer)
-			 != TX_SUCCESS) {
+			 != TX_SUCCESS)
 			pe_err("could not activate Auth Retry failure timer");
-			return;
-		}
+
+		return;
 	}
-	return;
+
+	/* Auth retry time out for wpa3 sae */
+	lim_handle_sae_auth_timeout(mac_ctx, session_entry);
 } /*** lim_process_auth_retry_timer() ***/
 
 void lim_process_auth_failure_timeout(struct mac_context *mac_ctx)

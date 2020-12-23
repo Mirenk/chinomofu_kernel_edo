@@ -240,6 +240,8 @@ enum hdd_adapter_flags {
 /* rcpi request timeout in milli seconds */
 #define WLAN_WAIT_TIME_RCPI 500
 
+#define WLAN_WAIT_PEER_CLEANUP 5000
+
 #define MAX_CFG_STRING_LEN  255
 
 /* Maximum time(ms) to wait for external acs response */
@@ -1402,6 +1404,7 @@ struct hdd_adapter {
 	uint32_t periodic_stats_timer_counter;
 	qdf_mutex_t sta_periodic_stats_lock;
 #endif /* WLAN_FEATURE_PERIODIC_STA_STATS */
+	qdf_event_t peer_cleanup_done;
 };
 
 #define WLAN_HDD_GET_STATION_CTX_PTR(adapter) (&(adapter)->session.station)
@@ -2586,6 +2589,24 @@ hdd_get_current_throughput_level(struct hdd_context *hdd_ctx)
 	return hdd_ctx->cur_vote_level;
 }
 
+/**
+ * hdd_set_current_throughput_level() - update the current vote
+ * level
+ * @hdd_ctx: the global hdd context
+ * @next_vote_level: pld_bus_width_type voting level
+ *
+ * This function updates the current vote level to the new level
+ * provided
+ *
+ * Return: None
+ */
+static inline void
+hdd_set_current_throughput_level(struct hdd_context *hdd_ctx,
+				 enum pld_bus_width_type next_vote_level)
+{
+	hdd_ctx->cur_vote_level = next_vote_level;
+}
+
 static inline bool
 hdd_is_low_tput_gro_enable(struct hdd_context *hdd_ctx)
 {
@@ -2641,6 +2662,12 @@ static inline enum pld_bus_width_type
 hdd_get_current_throughput_level(struct hdd_context *hdd_ctx)
 {
 	return PLD_BUS_WIDTH_NONE;
+}
+
+static inline void
+hdd_set_current_throughput_level(struct hdd_context *hdd_ctx,
+				 enum pld_bus_width_type next_vote_level)
+{
 }
 
 static inline bool

@@ -41,6 +41,7 @@
 #include "wlan_mlme_ucfg_api.h"
 #include "wlan_mlme_ucfg_api.h"
 #include "cdp_txrx_misc.h"
+#include "cdp_txrx_host_stats.h"
 
 #if (LINUX_VERSION_CODE < KERNEL_VERSION(4, 0, 0)) && !defined(WITH_BACKPORTS)
 #define HDD_INFO_SIGNAL                 STATION_INFO_SIGNAL
@@ -4992,7 +4993,7 @@ static int __wlan_hdd_cfg80211_dump_survey(struct wiphy *wiphy,
 	int status;
 	bool filled = false;
 
-	if (idx > QDF_MAX_NUM_CHAN - 1)
+	if (idx > NUM_CHANNELS - 1)
 		return -EINVAL;
 
 	hdd_ctx = WLAN_HDD_GET_CTX(adapter);
@@ -6107,6 +6108,12 @@ int wlan_hdd_get_station_stats(struct hdd_adapter *adapter)
 		tx_nss = wlan_vdev_mlme_get_nss(adapter->vdev);
 		rx_nss = wlan_vdev_mlme_get_nss(adapter->vdev);
 	}
+	/* Intersection of self and AP's NSS capability */
+	if (tx_nss > wlan_vdev_mlme_get_nss(adapter->vdev))
+		tx_nss = wlan_vdev_mlme_get_nss(adapter->vdev);
+
+	if (rx_nss > wlan_vdev_mlme_get_nss(adapter->vdev))
+		rx_nss = wlan_vdev_mlme_get_nss(adapter->vdev);
 
 	/* save class a stats to legacy location */
 	adapter->hdd_stats.class_a_stat.tx_nss = tx_nss;
@@ -6441,3 +6448,34 @@ void wlan_hdd_register_cp_stats_cb(struct hdd_context *hdd_ctx)
 					hdd_lost_link_cp_stats_info_cb);
 }
 
+QDF_STATUS hdd_update_sta_arp_stats(struct hdd_adapter *adapter)
+{
+	ol_txrx_soc_handle soc = cds_get_context(QDF_MODULE_ID_SOC);
+	struct cdp_peer_stats *peer_stats;
+	struct hdd_station_ctx *sta_ctx = WLAN_HDD_GET_STATION_CTX_PTR(adapter);
+	struct hdd_arp_stats_s *arp_stats;
+	QDF_STATUS status;
+
+	peer_stats = qdf_mem_malloc(sizeof(*peer_stats));
+	if (!peer_stats)
+		return QDF_STATUS_E_NOMEM;
+
+	status = cdp_host_get_peer_stats(soc, adapter->vdev_id,
+					 sta_ctx->conn_info.bssid.bytes,
+					 peer_stats);
+
+	if (QDF_IS_STATUS_ERROR(status))
+		goto done;
+
+	arp_stats = &adapter->hdd_stats.hdd_arp_stats;
+
+	arp_stats->tx_host_fw_sent =
+			arp_stats->tx_arp_req_count - arp_stats->tx_dropped;
+	arp_stats->tx_ack_cnt = arp_stats->tx_host_fw_sent -
+				peer_stats->tx.no_ack_count[QDF_PROTO_ARP_REQ];
+
+done:
+	qdf_mem_free(peer_stats);
+
+	return status;
+}

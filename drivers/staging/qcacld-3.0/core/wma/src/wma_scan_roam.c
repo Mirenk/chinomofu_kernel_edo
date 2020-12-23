@@ -325,6 +325,8 @@ static void wma_roam_scan_offload_set_params(
 				(roam_req->ConnectedNetwork.authentication,
 				 roam_req->ConnectedNetwork.encryption);
 
+	params->disable_self_roam =
+				!roam_req->enable_self_bss_roam;
 	params->roam_offload_enabled = roam_req->roam_offload_enabled;
 	params->roam_offload_params.ho_delay_for_rx =
 				roam_req->ho_delay_for_rx;
@@ -495,19 +497,28 @@ wma_roam_scan_offload_rssi_thresh(tp_wma_handle wma_handle,
 	params.traffic_threshold =
 			roam_params->traffic_threshold;
 	params.initial_dense_status = roam_params->initial_dense_status;
-	if (db2dbm_enabled)
+	if (db2dbm_enabled) {
 		params.bg_scan_bad_rssi_thresh =
 					   roam_params->bg_scan_bad_rssi_thresh;
-	else
+		params.roam_data_rssi_threshold =
+					roam_params->roam_data_rssi_threshold;
+	} else {
 		params.bg_scan_bad_rssi_thresh =
-					  roam_params->bg_scan_bad_rssi_thresh -
-					  WMA_NOISE_FLOOR_DBM_DEFAULT;
+				roam_params->bg_scan_bad_rssi_thresh -
+				WMA_NOISE_FLOOR_DBM_DEFAULT;
+		params.roam_data_rssi_threshold =
+					roam_params->roam_data_rssi_threshold -
+					WMA_NOISE_FLOOR_DBM_DEFAULT;
+	}
 
 	params.bg_scan_client_bitmap = roam_params->bg_scan_client_bitmap;
 	params.roam_bad_rssi_thresh_offset_2g =
 				roam_params->roam_bad_rssi_thresh_offset_2g;
 	if (params.roam_bad_rssi_thresh_offset_2g)
 		params.flags |= WMI_ROAM_BG_SCAN_FLAGS_2G_TO_5G_ONLY;
+	params.roam_data_rssi_threshold_triggers =
+		roam_params->roam_data_rssi_threshold_triggers;
+	params.rx_data_inactivity_time = roam_params->rx_data_inactivity_time;
 
 	/*
 	 * The current Noise floor in firmware is -96dBm. Penalty/Boost
@@ -615,6 +626,7 @@ wma_roam_scan_offload_rssi_thresh(tp_wma_handle wma_handle,
 		  roam_params->bg_scan_bad_rssi_thresh,
 		  roam_params->bg_scan_client_bitmap,
 		  roam_params->roam_bad_rssi_thresh_offset_2g);
+
 	return status;
 }
 
@@ -2540,10 +2552,14 @@ static int wma_fill_roam_synch_buffer(tp_wma_handle wma,
 	} else {
 		wma_fill_data_synch_event(wma, roam_synch_ind_ptr, param_buf);
 	}
-
 	chan = param_buf->chan;
-	if (chan)
+	if (chan) {
 		roam_synch_ind_ptr->chan_freq = chan->mhz;
+		roam_synch_ind_ptr->phy_mode =
+			wma_fw_to_host_phymode(WMI_GET_CHANNEL_MODE(chan));
+	} else {
+		roam_synch_ind_ptr->phy_mode = WLAN_PHYMODE_AUTO;
+	}
 
 	key = param_buf->key;
 	key_ft = param_buf->key_ext;
@@ -2831,6 +2847,29 @@ wma_roam_update_vdev(tp_wma_handle wma,
 	qdf_mem_free(add_sta_params);
 }
 
+/**
+ * wma_post_roam_sync_failure: Send roam sync failure ind to fw
+ * @wma: wma handle
+ * @vdev_id: session id
+ *
+ * Return: None
+ */
+static void wma_post_roam_sync_failure(tp_wma_handle wma, uint8_t vdev_id)
+{
+	struct roam_offload_scan_req *roam_req;
+
+	roam_req = qdf_mem_malloc(sizeof(struct roam_offload_scan_req));
+	if (roam_req) {
+		roam_req->Command = ROAM_SCAN_OFFLOAD_STOP;
+		roam_req->reason = REASON_ROAM_SYNCH_FAILED;
+		roam_req->sessionId = vdev_id;
+		wma_debug("In cleanup: RSO Command:%d, reason %d vdev %d",
+			  roam_req->Command, roam_req->reason,
+			  roam_req->sessionId);
+		wma_process_roaming_config(wma, roam_req);
+	}
+}
+
 int wma_mlme_roam_synch_event_handler_cb(void *handle, uint8_t *event,
 					 uint32_t len)
 {
@@ -2842,12 +2881,12 @@ int wma_mlme_roam_synch_event_handler_cb(void *handle, uint8_t *event,
 	uint8_t channel;
 	uint16_t ie_len = 0;
 	int status = -EINVAL;
-	struct roam_offload_scan_req *roam_req;
 	qdf_time_t roam_synch_received = qdf_get_system_timestamp();
 	uint32_t roam_synch_data_len;
 	A_UINT32 bcn_probe_rsp_len;
 	A_UINT32 reassoc_rsp_len;
 	A_UINT32 reassoc_req_len;
+	WMI_HOST_WLAN_PHY_MODE phymode;
 
 	WMA_LOGD("LFR3:%s", __func__);
 	if (!event) {
@@ -3041,15 +3080,17 @@ int wma_mlme_roam_synch_event_handler_cb(void *handle, uint8_t *event,
 	 */
 	channel = wlan_freq_to_chan(wma->interfaces[synch_event->vdev_id].mhz);
 	if (param_buf->chan) {
-		wma->interfaces[synch_event->vdev_id].chanmode =
-			WMI_GET_CHANNEL_MODE(param_buf->chan);
+		phymode = WMI_GET_CHANNEL_MODE(param_buf->chan);
 	} else {
 		wma_get_phy_mode_cb(channel,
-				    wma->interfaces[synch_event->vdev_id].
-				    chan_width,
-				    &wma->interfaces[synch_event->vdev_id].
-				    chanmode);
+			wma->interfaces[synch_event->vdev_id].chan_width,
+			&phymode);
 	}
+	wma->interfaces[synch_event->vdev_id].chanmode = phymode;
+	/* Update new peer phymode after roaming */
+	wma_objmgr_set_peer_mlme_phymode(wma, roam_synch_ind_ptr->bssid.bytes,
+					 phymode);
+	wma_debug("LFR3: new phymode %d", phymode);
 
 	wma->csr_roam_synch_cb(wma->mac_context, roam_synch_ind_ptr,
 			       bss_desc_ptr, SIR_ROAM_SYNCH_COMPLETE);
@@ -3068,13 +3109,8 @@ cleanup_label:
 			wma->csr_roam_synch_cb(wma->mac_context,
 					       roam_synch_ind_ptr, NULL,
 					       SIR_ROAMING_ABORT);
-		roam_req = qdf_mem_malloc(sizeof(struct roam_offload_scan_req));
-		if (roam_req && synch_event) {
-			roam_req->Command = ROAM_SCAN_OFFLOAD_STOP;
-			roam_req->reason = REASON_ROAM_SYNCH_FAILED;
-			roam_req->sessionId = synch_event->vdev_id;
-			wma_process_roaming_config(wma, roam_req);
-		}
+		if (synch_event)
+			wma_post_roam_sync_failure(wma, synch_event->vdev_id);
 	}
 	if (roam_synch_ind_ptr && roam_synch_ind_ptr->join_rsp)
 		qdf_mem_free(roam_synch_ind_ptr->join_rsp);
@@ -3275,6 +3311,7 @@ int wma_roam_synch_event_handler(void *handle, uint8_t *event,
 						   event);
 	if (QDF_IS_STATUS_ERROR(qdf_status)) {
 		wma_err("Failed to send the EV_ROAM");
+		wma_post_roam_sync_failure(wma, synch_event->vdev_id);
 		return status;
 	}
 	wma_debug("Posted EV_ROAM to VDEV SM");

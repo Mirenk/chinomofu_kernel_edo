@@ -1217,6 +1217,7 @@ static void lim_set_rmf_enabled(struct mac_context *mac,
 	else
 		session->limRmfEnabled = 0;
 
+	session->mgmt_cipher_type = csr_join_req->MgmtEncryptionType;
 	pe_debug("mgmt encryption type %d limRmfEnabled %d",
 		 csr_join_req->MgmtEncryptionType, session->limRmfEnabled);
 }
@@ -2787,7 +2788,7 @@ void lim_delete_all_peers(struct pe_session *session)
 					    &session->dph.dphHashTable);
 		if (!sta_ds)
 			continue;
-		status = lim_del_sta(mac_ctx, sta_ds, false, session);
+		status = lim_del_sta(mac_ctx, sta_ds, true, session);
 		if (QDF_STATUS_SUCCESS == status) {
 			lim_delete_dph_hash_entry(mac_ctx, sta_ds->staAddr,
 						  sta_ds->assocId, session);
@@ -5133,6 +5134,14 @@ static void lim_process_sme_channel_change_request(struct mac_context *mac_ctx,
 		      ch_change_req->ch_width, ch_change_req->nw_type,
 		      ch_change_req->dot11mode);
 
+	if (IS_DOT11_MODE_HE(ch_change_req->dot11mode)) {
+		if (wlan_reg_is_24ghz_ch(ch_change_req->targetChannel) &&
+		    !mac_ctx->mlme_cfg->vht_caps.vht_cap_info.b24ghz_band)
+			session_entry->vhtCapability = 0;
+		else if (wlan_reg_is_5ghz_ch(ch_change_req->targetChannel))
+			session_entry->vhtCapability = 1;
+	}
+
 	/* Store the New Channel Params in session_entry */
 	session_entry->ch_width = ch_change_req->ch_width;
 	session_entry->ch_center_freq_seg0 =
@@ -5719,10 +5728,11 @@ static void lim_process_sme_dfs_csa_ie_request(struct mac_context *mac_ctx,
 			 dfs_csa_ie_req->ch_switch_mode;
 
 	/*
-	 * Validate if SAP is operating HT or VHT mode and set the Channel
+	 * Validate if SAP is operating HT or VHT/HE mode and set the Channel
 	 * Switch Wrapper element with the Wide Band Switch subelement.
 	 */
-	if (true != session_entry->vhtCapability)
+	if (!(session_entry->vhtCapability ||
+	      lim_is_session_he_capable(session_entry)))
 		goto skip_vht;
 
 	/* Now encode the Wider Ch BW element depending on the ch width */
@@ -6384,6 +6394,8 @@ void lim_add_roam_blacklist_ap(struct mac_context *mac_ctx,
 	struct sir_rssi_disallow_lst entry;
 	struct roam_blacklist_timeout *blacklist;
 
+	pe_debug("Received Blacklist event from FW num entries %d",
+		 src_lst->num_entries);
 	blacklist = &src_lst->roam_blacklist[0];
 	for (i = 0; i < src_lst->num_entries; i++) {
 

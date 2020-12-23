@@ -62,7 +62,8 @@ QDF_STATUS lim_populate_peer_rate_set(struct mac_context *mac,
 				      uint8_t basicOnly,
 				      struct pe_session *pe_session,
 				      tDot11fIEVHTCaps *pVHTCaps,
-				      tDot11fIEhe_cap *he_caps);
+				      tDot11fIEhe_cap *he_caps,
+				      struct bss_description *bss_desc);
 
 /**
  * lim_populate_own_rate_set() - comprises the basic and extended rates read
@@ -184,7 +185,8 @@ void lim_update_re_assoc_globals(struct mac_context *mac,
 
 void lim_update_assoc_sta_datas(struct mac_context *mac,
 				tpDphHashNode sta, tpSirAssocRsp pAssocRsp,
-				struct pe_session *pe_session);
+				struct pe_session *pe_session,
+				tSchBeaconStruct *beacon);
 
 QDF_STATUS lim_sta_send_add_bss(struct mac_context *mac, tpSirAssocRsp pAssocRsp,
 				   tpSchBeaconStruct pBeaconStruct,
@@ -299,4 +301,18 @@ void
 lim_extract_ies_from_deauth_disassoc(struct pe_session *session,
 				     uint8_t *deauth_disassoc_frame,
 				     uint16_t deauth_disassoc_frame_len);
+
+/**
+ * lim_update_vhtcaps_assoc_resp : Update VHT caps in assoc response.
+ * @mac_ctx Pointer to Global MAC structure
+ * @pAddBssParams: bss param
+ * @vht_caps: VHT capabilities.
+ * @pe_session : session entry.
+ *
+ * Return : void
+ */
+void lim_update_vhtcaps_assoc_resp(struct mac_context *mac_ctx,
+				   tpAddBssParams pAddBssParams,
+				   tDot11fIEVHTCaps *vht_caps,
+				   struct pe_session *pe_session);
 #endif /* __LIM_ASSOC_UTILS_H */

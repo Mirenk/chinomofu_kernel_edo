@@ -723,6 +723,7 @@ struct bss_description {
 #endif
 	uint32_t assoc_disallowed;
 	uint32_t adaptive_11r_ap;
+	uint32_t mbo_oce_enabled_ap;
 #if defined(WLAN_SAE_SINGLE_PMK) && defined(WLAN_FEATURE_ROAM_OFFLOAD)
 	uint32_t is_single_pmk;
 #endif
@@ -2196,6 +2197,9 @@ typedef enum {
  * @bg_scan_bad_rssi_thresh:    Bad RSSI threshold to perform bg scan.
  * @bad_rssi_thresh_offset_2g:  Offset from Bad RSSI threshold for 2G to 5G Roam
  * @bg_scan_client_bitmap:      Bitmap to identify the client scans to snoop.
+ * @roam_data_rssi_threshold_triggers:    Bad data RSSI threshold to roam
+ * @roam_data_rssi_threshold:    Bad data RSSI threshold to roam
+ * @rx_data_inactivity_time:    rx duration to check data RSSI
  *
  * This structure holds all the key parameters related to
  * initial connection and also roaming connections.
@@ -2229,6 +2233,9 @@ struct roam_ext_params {
 	int8_t bg_scan_bad_rssi_thresh;
 	uint8_t roam_bad_rssi_thresh_offset_2g;
 	uint32_t bg_scan_client_bitmap;
+	uint32_t roam_data_rssi_threshold_triggers;
+	int32_t roam_data_rssi_threshold;
+	uint32_t rx_data_inactivity_time;
 };
 
 /**
@@ -2327,6 +2334,7 @@ struct roam_offload_scan_req {
 	eSirDFSRoamScanMode allowDFSChannelRoam;
 #ifdef WLAN_FEATURE_ROAM_OFFLOAD
 	uint8_t roam_offload_enabled;
+	bool enable_self_bss_roam;
 	uint8_t PSK_PMK[SIR_ROAM_SCAN_PSK_SIZE];
 	uint32_t pmk_len;
 	uint8_t Prefer5GHz;
@@ -2446,8 +2454,8 @@ struct sir_wifi_start_log {
  */
 struct sir_pcl_list {
 	uint32_t pcl_len;
-	uint8_t pcl_list[128];
-	uint8_t weight_list[128];
+	uint8_t pcl_list[NUM_CHANNELS];
+	uint8_t weight_list[NUM_CHANNELS];
 };
 
 /**
@@ -2463,12 +2471,12 @@ struct sir_pcl_list {
  * @weight_list: Weights assigned by policy manager
  */
 struct sir_pcl_chan_weights {
-	uint8_t pcl_list[128];
+	uint8_t pcl_list[NUM_CHANNELS];
 	uint32_t pcl_len;
-	uint8_t saved_chan_list[128];
+	uint8_t saved_chan_list[NUM_CHANNELS];
 	uint32_t saved_num_chan;
-	uint8_t weighed_valid_list[128];
-	uint8_t weight_list[128];
+	uint8_t weighed_valid_list[NUM_CHANNELS];
+	uint8_t weight_list[NUM_CHANNELS];
 };
 
 /**
@@ -3140,6 +3148,7 @@ struct roam_offload_synch_ind {
 	struct qdf_mac_addr src_mac;
 	uint16_t hlp_data_len;
 	uint8_t hlp_data[FILS_MAX_HLP_DATA_LEN];
+	enum wlan_phymode phy_mode;
 };
 
 #ifdef WLAN_FEATURE_ROAM_OFFLOAD
@@ -3585,6 +3594,8 @@ struct sir_set_ht_vht_cfg {
 #define WIFI_INVALID_PEER_ID            (-1)
 #define WIFI_INVALID_VDEV_ID            (-1)
 #define WIFI_MAX_AC                     (4)
+#define RATE_STAT_MCS_MASK              (0xFF00)
+#define RATE_STAT_GET_MCS_INDEX(x)      (((x) & RATE_STAT_MCS_MASK) >> 8)
 
 typedef struct {
 	uint32_t paramId;
@@ -5665,6 +5676,7 @@ struct ppet_hdr {
 #define HE_CH_WIDTH_COMBINE(b0, b1, b2, b3, b4, b5, b6)             \
 	((uint8_t)(b0) | ((b1) << 1) | ((b2) << 2) |  ((b3) << 3) | \
 	((b4) << 4) | ((b5) << 5) | ((b6) << 6))
+#define HE_CH_WIDTH_CLR_BIT(ch_wd, bit)      (((ch_wd) >> (bit)) & ~1)
 
 /*
  * MCS values are interpreted as in IEEE 11ax-D1.4 spec onwards

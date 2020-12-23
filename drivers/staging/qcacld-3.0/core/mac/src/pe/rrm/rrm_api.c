@@ -537,7 +537,7 @@ rrm_process_beacon_report_req(struct mac_context *mac,
 
 	measDuration = pBeaconReq->measurement_request.Beacon.meas_duration;
 
-	pe_nofl_info("RX: [802.11 BCN_RPT] seq:%d SSID:%.*s BSSID:%pM Token:%d op_class:%d ch:%d meas_mode:%d meas_duration:%d max_dur: %d sign: %d max_meas_dur: %d index:%d",
+	pe_nofl_info("RX: [802.11 BCN_RPT] seq:%d SSID:%.*s BSSID:%pM Token:%d op_class:%d ch:%d meas_mode:%d meas_duration:%d max_dur: %d sign: %d max_meas_dur: %d",
 		     mac->rrm.rrmPEContext.prev_rrm_report_seq_num,
 		     pBeaconReq->measurement_request.Beacon.SSID.num_ssid,
 		     pBeaconReq->measurement_request.Beacon.SSID.ssid,
@@ -546,8 +546,7 @@ rrm_process_beacon_report_req(struct mac_context *mac,
 		     pBeaconReq->measurement_request.Beacon.regClass,
 		     pBeaconReq->measurement_request.Beacon.channel,
 		     pBeaconReq->measurement_request.Beacon.meas_mode,
-		     measDuration, maxDuration, sign, maxMeasduration,
-		     pSmeBcnReportReq->measurement_idx);
+		     measDuration, maxDuration, sign, maxMeasduration);
 
 	if (measDuration == 0 &&
 	    pBeaconReq->measurement_request.Beacon.meas_mode !=
@@ -1036,7 +1035,7 @@ end:
 
 	if (beacon_xmit_ind->fMeasureDone) {
 		pe_debug("Measurement done.");
-		rrm_cleanup(mac_ctx);
+		rrm_cleanup(mac_ctx, beacon_xmit_ind->measurement_idx);
 	}
 
 	if (report)
@@ -1140,7 +1139,7 @@ QDF_STATUS rrm_process_beacon_req(struct mac_context *mac_ctx, tSirMacAddr peer,
 		curr_req = mac_ctx->rrm.rrmPEContext.pCurrentReq[index];
 		if (curr_req) {
 			qdf_mem_free(curr_req);
-			curr_req = NULL;
+			mac_ctx->rrm.rrmPEContext.pCurrentReq[index] = NULL;
 		}
 
 		curr_req = qdf_mem_malloc(sizeof(*curr_req));
@@ -1161,7 +1160,7 @@ QDF_STATUS rrm_process_beacon_req(struct mac_context *mac_ctx, tSirMacAddr peer,
 		if (eRRM_SUCCESS != rrm_status) {
 			rrm_process_beacon_request_failure(mac_ctx,
 				session_entry, peer, rrm_status, index);
-			rrm_cleanup(mac_ctx);
+			rrm_cleanup(mac_ctx, index);
 		}
 	}
 
@@ -1360,9 +1359,11 @@ tpRRMCaps rrm_get_capabilities(struct mac_context *mac, struct pe_session *pe_se
 QDF_STATUS rrm_initialize(struct mac_context *mac)
 {
 	tpRRMCaps pRRMCaps = &mac->rrm.rrmPEContext.rrmEnabledCaps;
+	uint8_t i;
 
-	mac->rrm.rrmPEContext.pCurrentReq[0] = NULL;
-	mac->rrm.rrmPEContext.pCurrentReq[1] = NULL;
+	for (i = 0; i < MAX_MEASUREMENT_REQUEST; i++)
+		mac->rrm.rrmPEContext.pCurrentReq[i] = NULL;
+
 	mac->rrm.rrmPEContext.txMgmtPower = 0;
 	mac->rrm.rrmPEContext.DialogToken = 0;
 
@@ -1385,42 +1386,20 @@ QDF_STATUS rrm_initialize(struct mac_context *mac)
 	return QDF_STATUS_SUCCESS;
 }
 
-/* -------------------------------------------------------------------- */
-/**
- * rrm_cleanup
- *
- * FUNCTION:
- * cleanup RRM module
- *
- * LOGIC:
- *
- * ASSUMPTIONS:
- *
- * NOTE:
- *
- * @param mode
- * @param rate
- * @return None
- */
-
-QDF_STATUS rrm_cleanup(struct mac_context *mac)
+void rrm_cleanup(struct mac_context *mac, uint8_t idx)
 {
-	uint8_t i;
+	tpRRMReq cur_rrm_req = NULL;
 
-	for (i = 0; i < MAX_MEASUREMENT_REQUEST; i++) {
-		if (mac->rrm.rrmPEContext.pCurrentReq[i]) {
-			if (mac->rrm.rrmPEContext.pCurrentReq[i]->request.
-			    Beacon.reqIes.pElementIds)
-				qdf_mem_free(mac->rrm.rrmPEContext.
-					     pCurrentReq[i]->request.Beacon.
-					     reqIes.pElementIds);
+	cur_rrm_req = mac->rrm.rrmPEContext.pCurrentReq[idx];
+	if (!cur_rrm_req)
+		return;
 
-			qdf_mem_free(mac->rrm.rrmPEContext.pCurrentReq[i]);
-		}
-		mac->rrm.rrmPEContext.pCurrentReq[i] = NULL;
-	}
+	qdf_mem_free(cur_rrm_req->request.Beacon.reqIes.pElementIds);
+	cur_rrm_req->request.Beacon.reqIes.pElementIds = NULL;
+	cur_rrm_req->request.Beacon.reqIes.num = 0;
 
-	return QDF_STATUS_SUCCESS;
+	qdf_mem_free(cur_rrm_req);
+	mac->rrm.rrmPEContext.pCurrentReq[idx] = NULL;
 }
 
 /**

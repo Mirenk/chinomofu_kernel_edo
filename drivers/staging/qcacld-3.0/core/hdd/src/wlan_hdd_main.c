@@ -929,7 +929,7 @@ enum phy_ch_width hdd_map_nl_chan_width(enum nl80211_chan_width ch_width)
 }
 
 #if defined(WLAN_FEATURE_NAN) && \
-	   (KERNEL_VERSION(4, 19, 0) <= LINUX_VERSION_CODE)
+	   (KERNEL_VERSION(4, 14, 0) <= LINUX_VERSION_CODE)
 /**
  * wlan_hdd_convert_nan_type() - Convert nl type to qdf type
  * @nl_type: NL80211 interface type
@@ -961,6 +961,11 @@ static void wlan_hdd_set_nan_if_type(struct hdd_adapter *adapter)
 {
 	adapter->wdev.iftype = NL80211_IFTYPE_NAN;
 }
+
+static bool wlan_hdd_is_vdev_creation_allowed(struct wlan_objmgr_psoc *psoc)
+{
+	return ucfg_nan_is_vdev_creation_allowed(psoc);
+}
 #else
 static QDF_STATUS wlan_hdd_convert_nan_type(enum nl80211_iftype nl_type,
 					    enum QDF_OPMODE *out_qdf_type)
@@ -970,6 +975,11 @@ static QDF_STATUS wlan_hdd_convert_nan_type(enum nl80211_iftype nl_type,
 
 static void wlan_hdd_set_nan_if_type(struct hdd_adapter *adapter)
 {
+}
+
+static bool wlan_hdd_is_vdev_creation_allowed(struct wlan_objmgr_psoc *psoc)
+{
+	return false;
 }
 #endif
 
@@ -1887,6 +1897,9 @@ static void hdd_update_wiphy_he_cap(struct hdd_context *hdd_ctx)
 	struct ieee80211_supported_band *band_5g =
 			hdd_ctx->wiphy->bands[HDD_NL80211_BAND_5GHZ];
 	QDF_STATUS status;
+	uint8_t *phy_info_5g =
+		    hdd_ctx->iftype_data_5g->he_cap.he_cap_elem.phy_cap_info;
+	uint8_t max_fw_bw = sme_get_vht_ch_width();
 
 	status = ucfg_mlme_cfg_get_he_caps(hdd_ctx->psoc, &he_cap_cfg);
 
@@ -1906,6 +1919,15 @@ static void hdd_update_wiphy_he_cap(struct hdd_context *hdd_ctx)
 		hdd_ctx->iftype_data_5g->he_cap.has_he = he_cap_cfg.present;
 		band_5g->n_iftype_data = 1;
 		band_5g->iftype_data = hdd_ctx->iftype_data_5g;
+		if (max_fw_bw >= WNI_CFG_VHT_CHANNEL_WIDTH_80MHZ)
+			phy_info_5g[0] |=
+				IEEE80211_HE_PHY_CAP0_CHANNEL_WIDTH_SET_40MHZ_80MHZ_IN_5G;
+		if (max_fw_bw >= WNI_CFG_VHT_CHANNEL_WIDTH_160MHZ)
+			phy_info_5g[0] |=
+				IEEE80211_HE_PHY_CAP0_CHANNEL_WIDTH_SET_160MHZ_IN_5G;
+		if (max_fw_bw >= WNI_CFG_VHT_CHANNEL_WIDTH_80_PLUS_80MHZ)
+			phy_info_5g[0] |=
+			     IEEE80211_HE_PHY_CAP0_CHANNEL_WIDTH_SET_80PLUS80_MHZ_IN_5G;
 	}
 }
 #else
@@ -2346,9 +2368,12 @@ static int __hdd_mon_open(struct net_device *dev)
 	if (!ret)
 		ret = hdd_enable_monitor_mode(dev);
 
-	if (!ret)
+	if (!ret) {
+		hdd_set_current_throughput_level(hdd_ctx,
+						 PLD_BUS_WIDTH_VERY_HIGH);
 		pld_request_bus_bandwidth(hdd_ctx->parent_dev,
 					  PLD_BUS_WIDTH_VERY_HIGH);
+	}
 
 	return ret;
 }
@@ -2521,44 +2546,6 @@ exit_with_success:
 
 err_start_adapter:
 	return -EINVAL;
-}
-
-/**
- * hdd_enable_power_management() - API to Enable Power Management
- *
- * API invokes Bus Interface Layer power management functionality
- *
- * Return: None
- */
-static void hdd_enable_power_management(void)
-{
-	void *hif_ctx = cds_get_context(QDF_MODULE_ID_HIF);
-
-	if (!hif_ctx) {
-		hdd_err("Bus Interface Context is Invalid");
-		return;
-	}
-
-	hif_enable_power_management(hif_ctx, cds_is_packet_log_enabled());
-}
-
-/**
- * hdd_disable_power_management() - API to disable Power Management
- *
- * API disable Bus Interface Layer Power management functionality
- *
- * Return: None
- */
-static void hdd_disable_power_management(void)
-{
-	void *hif_ctx = cds_get_context(QDF_MODULE_ID_HIF);
-
-	if (!hif_ctx) {
-		hdd_err("Bus Interface Context is Invalid");
-		return;
-	}
-
-	hif_disable_power_management(hif_ctx);
 }
 
 void hdd_update_hw_sw_info(struct hdd_context *hdd_ctx)
@@ -2774,33 +2761,6 @@ int hdd_assemble_rate_code(uint8_t preamble, uint8_t nss, uint8_t rate)
 	return set_value;
 }
 
-#ifdef FEATURE_WLAN_WAPI
-/**
- * hdd_wapi_security_sta_exist() - return wapi security sta exist or not
- *
- * This API returns the wapi security station exist or not
- *
- * Return: true - wapi security station exist
- */
-static bool hdd_wapi_security_sta_exist(void)
-{
-	struct hdd_adapter *adapter = NULL;
-	struct hdd_context *hdd_ctx = cds_get_context(QDF_MODULE_ID_HDD);
-
-	hdd_for_each_adapter(hdd_ctx, adapter) {
-		if ((adapter->device_mode == QDF_STA_MODE) &&
-		    adapter->wapi_info.wapi_mode &&
-		    (adapter->wapi_info.wapi_auth_mode != WAPI_AUTH_MODE_OPEN))
-			return true;
-	}
-	return false;
-}
-#else
-static bool hdd_wapi_security_sta_exist(void)
-{
-	return false;
-}
-#endif
 
 #ifdef FEATURE_WLAN_MCC_TO_SCC_SWITCH
 static enum policy_mgr_con_mode wlan_hdd_get_mode_for_non_connected_vdev(
@@ -2858,8 +2818,6 @@ static void hdd_register_policy_manager_callback(
 	hdd_cbacks.get_mode_for_non_connected_vdev =
 		wlan_hdd_get_mode_for_non_connected_vdev;
 	hdd_cbacks.hdd_get_device_mode = hdd_get_device_mode;
-	hdd_cbacks.hdd_wapi_security_sta_exist =
-		hdd_wapi_security_sta_exist;
 	hdd_cbacks.hdd_is_chan_switch_in_progress =
 				hdd_is_chan_switch_in_progress;
 	hdd_cbacks.wlan_hdd_set_sap_csa_reason =
@@ -3057,6 +3015,226 @@ static void wlan_hdd_deinit_tx_rx_histogram(struct hdd_context *hdd_ctx)
 	hdd_ctx->hdd_txrx_hist = NULL;
 }
 
+#ifdef WLAN_NS_OFFLOAD
+/**
+ * hdd_wlan_unregister_ip6_notifier() - unregister IPv6 change notifier
+ * @hdd_ctx: Pointer to hdd context
+ *
+ * Unregister for IPv6 address change notifications.
+ *
+ * Return: None
+ */
+static void hdd_wlan_unregister_ip6_notifier(struct hdd_context *hdd_ctx)
+{
+	unregister_inet6addr_notifier(&hdd_ctx->ipv6_notifier);
+}
+
+/**
+ * hdd_wlan_register_ip6_notifier() - register IPv6 change notifier
+ * @hdd_ctx: Pointer to hdd context
+ *
+ * Register for IPv6 address change notifications.
+ *
+ * Return: 0 on success and errno on failure.
+ */
+static int hdd_wlan_register_ip6_notifier(struct hdd_context *hdd_ctx)
+{
+	int ret;
+
+	hdd_ctx->ipv6_notifier.notifier_call = wlan_hdd_ipv6_changed;
+	ret = register_inet6addr_notifier(&hdd_ctx->ipv6_notifier);
+	if (ret) {
+		hdd_err("Failed to register IPv6 notifier: %d", ret);
+		goto out;
+	}
+
+	hdd_debug("Registered IPv6 notifier");
+out:
+	return ret;
+}
+#else
+/**
+ * hdd_wlan_unregister_ip6_notifier() - unregister IPv6 change notifier
+ * @hdd_ctx: Pointer to hdd context
+ *
+ * Unregister for IPv6 address change notifications.
+ *
+ * Return: None
+ */
+static void hdd_wlan_unregister_ip6_notifier(struct hdd_context *hdd_ctx)
+{
+}
+
+/**
+ * hdd_wlan_register_ip6_notifier() - register IPv6 change notifier
+ * @hdd_ctx: Pointer to hdd context
+ *
+ * Register for IPv6 address change notifications.
+ *
+ * Return: None
+ */
+static int hdd_wlan_register_ip6_notifier(struct hdd_context *hdd_ctx)
+{
+	return 0;
+}
+#endif
+
+#ifdef FEATURE_RUNTIME_PM
+/**
+ * hdd_wlan_register_pm_qos_notifier() - register PM QOS notifier
+ * @hdd_ctx: Pointer to hdd context
+ *
+ * Register for PM QOS change notifications.
+ *
+ * Return: None
+ */
+static int hdd_wlan_register_pm_qos_notifier(struct hdd_context *hdd_ctx)
+{
+	int ret;
+
+	/* if gRuntimePM is 1 then feature is enabled without CXPC */
+	if (hdd_ctx->config->runtime_pm != hdd_runtime_pm_dynamic) {
+		hdd_debug("Dynamic Runtime PM disabled");
+		return 0;
+	}
+
+	qdf_spinlock_create(&hdd_ctx->pm_qos_lock);
+	hdd_ctx->pm_qos_notifier.notifier_call = wlan_hdd_pm_qos_notify;
+	ret = pm_qos_add_notifier(PM_QOS_CPU_DMA_LATENCY,
+				  &hdd_ctx->pm_qos_notifier);
+	if (ret)
+		hdd_err("Failed to register PM_QOS notifier: %d", ret);
+	else
+		hdd_debug("PM QOS Notifier registered");
+
+	return ret;
+}
+
+/**
+ * hdd_wlan_unregister_pm_qos_notifier() - unregister PM QOS notifier
+ * @hdd_ctx: Pointer to hdd context
+ *
+ * Unregister for PM QOS change notifications.
+ *
+ * Return: None
+ */
+static void hdd_wlan_unregister_pm_qos_notifier(struct hdd_context *hdd_ctx)
+{
+	void *hif_ctx = cds_get_context(QDF_MODULE_ID_HIF);
+	int ret;
+
+	if (hdd_ctx->config->runtime_pm != hdd_runtime_pm_dynamic) {
+		hdd_debug("Dynamic Runtime PM disabled");
+		return;
+	}
+
+	ret = pm_qos_remove_notifier(PM_QOS_CPU_DMA_LATENCY,
+				     &hdd_ctx->pm_qos_notifier);
+	if (ret)
+		hdd_warn("Failed to remove qos notifier, err = %d\n", ret);
+
+	qdf_spin_lock_irqsave(&hdd_ctx->pm_qos_lock);
+
+	if (hdd_ctx->runtime_pm_prevented) {
+		hif_pm_runtime_put_noidle(hif_ctx, RTPM_ID_QOS_NOTIFY);
+		hdd_ctx->runtime_pm_prevented = false;
+	}
+
+	qdf_spin_unlock_irqrestore(&hdd_ctx->pm_qos_lock);
+
+	qdf_spinlock_destroy(&hdd_ctx->pm_qos_lock);
+}
+#else
+static int hdd_wlan_register_pm_qos_notifier(struct hdd_context *hdd_ctx)
+{
+	return 0;
+}
+
+static void hdd_wlan_unregister_pm_qos_notifier(struct hdd_context *hdd_ctx)
+{
+}
+#endif
+
+/**
+ * hdd_enable_power_management() - API to Enable Power Management
+ *
+ * API invokes Bus Interface Layer power management functionality
+ *
+ * Return: None
+ */
+static void hdd_enable_power_management(struct hdd_context *hdd_ctx)
+{
+	void *hif_ctx = cds_get_context(QDF_MODULE_ID_HIF);
+
+	if (!hif_ctx) {
+		hdd_err("Bus Interface Context is Invalid");
+		return;
+	}
+
+	hif_enable_power_management(hif_ctx, cds_is_packet_log_enabled());
+	hdd_wlan_register_pm_qos_notifier(hdd_ctx);
+}
+
+/**
+ * hdd_disable_power_management() - API to disable Power Management
+ *
+ * API disable Bus Interface Layer Power management functionality
+ *
+ * Return: None
+ */
+static void hdd_disable_power_management(struct hdd_context *hdd_ctx)
+{
+	void *hif_ctx = cds_get_context(QDF_MODULE_ID_HIF);
+
+	if (!hif_ctx) {
+		hdd_err("Bus Interface Context is Invalid");
+		return;
+	}
+
+	hdd_wlan_unregister_pm_qos_notifier(hdd_ctx);
+	hif_disable_power_management(hif_ctx);
+}
+
+/**
+ * hdd_register_notifiers - Register netdev notifiers.
+ * @hdd_ctx: HDD context
+ *
+ * Register netdev notifiers like IPv4 and IPv6.
+ *
+ * Return: 0 on success and errno on failure
+ */
+static int hdd_register_notifiers(struct hdd_context *hdd_ctx)
+{
+	int ret;
+
+	ret = hdd_wlan_register_ip6_notifier(hdd_ctx);
+	if (ret)
+		goto out;
+
+	hdd_ctx->ipv4_notifier.notifier_call = wlan_hdd_ipv4_changed;
+	ret = register_inetaddr_notifier(&hdd_ctx->ipv4_notifier);
+	if (ret) {
+		hdd_err("Failed to register IPv4 notifier: %d", ret);
+		goto unregister_ip6_notifier;
+	}
+
+	ret = hdd_nud_register_netevent_notifier(hdd_ctx);
+	if (ret) {
+		hdd_err("Failed to register netevent notifier: %d",
+			ret);
+		goto unregister_inetaddr_notifier;
+	}
+
+	return 0;
+
+unregister_inetaddr_notifier:
+	unregister_inetaddr_notifier(&hdd_ctx->ipv4_notifier);
+unregister_ip6_notifier:
+	hdd_wlan_unregister_ip6_notifier(hdd_ctx);
+out:
+	return ret;
+}
+
 int hdd_wlan_start_modules(struct hdd_context *hdd_ctx, bool reinit)
 {
 	int ret = 0;
@@ -3205,6 +3383,10 @@ int hdd_wlan_start_modules(struct hdd_context *hdd_ctx, bool reinit)
 			goto cds_txrx_free;
 		}
 
+		ret = hdd_register_notifiers(hdd_ctx);
+		if (ret)
+			goto deregister_cb;
+
 		/*
 		 * NAN compoenet requires certian operations like, open adapter,
 		 * close adapter, etc. to be initiated by HDD, for those
@@ -3216,7 +3398,7 @@ int hdd_wlan_start_modules(struct hdd_context *hdd_ctx, bool reinit)
 		if (!QDF_IS_STATUS_SUCCESS(status)) {
 			hdd_err("Failed to pre-enable CDS; status: %d", status);
 			ret = qdf_status_to_os_return(status);
-			goto deregister_cb;
+			goto unregister_notifiers;
 		}
 
 		hdd_register_policy_manager_callback(
@@ -3230,7 +3412,7 @@ int hdd_wlan_start_modules(struct hdd_context *hdd_ctx, bool reinit)
 		hdd_update_hw_sw_info(hdd_ctx);
 
 		if (QDF_GLOBAL_FTM_MODE == hdd_get_conparam()) {
-			hdd_enable_power_management();
+			hdd_enable_power_management(hdd_ctx);
 			hdd_err("in ftm mode, no need to configure cds modules");
 			ret = -EINVAL;
 			break;
@@ -3242,7 +3424,7 @@ int hdd_wlan_start_modules(struct hdd_context *hdd_ctx, bool reinit)
 			goto destroy_driver_sysfs;
 		}
 
-		hdd_enable_power_management();
+		hdd_enable_power_management(hdd_ctx);
 
 		hdd_skip_acs_scan_timer_init(hdd_ctx);
 
@@ -3269,6 +3451,9 @@ destroy_driver_sysfs:
 	hdd_sysfs_destroy_version_interface();
 	hdd_sysfs_destroy_driver_root_obj();
 	cds_post_disable();
+
+unregister_notifiers:
+	hdd_unregister_notifiers(hdd_ctx);
 
 deregister_cb:
 	hdd_deregister_cb(hdd_ctx);
@@ -4461,18 +4646,21 @@ hdd_store_nss_chains_cfg_in_vdev(struct hdd_adapter *adapter)
 {
 	struct wlan_mlme_nss_chains vdev_ini_cfg;
 	struct hdd_context *hdd_ctx = WLAN_HDD_GET_CTX(adapter);
+	struct wlan_objmgr_vdev *vdev;
 
 	/* Populate the nss chain params from ini for this vdev type */
 	sme_populate_nss_chain_params(hdd_ctx->mac_handle, &vdev_ini_cfg,
 				      adapter->device_mode,
 				      hdd_ctx->num_rf_chains);
 
+	vdev = hdd_objmgr_get_vdev(adapter);
 	/* Store the nss chain config into the vdev */
-	if (adapter->vdev)
+	if (vdev) {
 		sme_store_nss_chains_cfg_in_vdev(adapter->vdev, &vdev_ini_cfg);
-	else
+		hdd_objmgr_put_vdev(vdev);
+	} else {
 		hdd_err("Vdev is NULL");
-
+	}
 }
 
 bool hdd_is_vdev_in_conn_state(struct hdd_adapter *adapter)
@@ -5547,6 +5735,7 @@ struct hdd_adapter *hdd_open_adapter(struct hdd_context *hdd_ctx, uint8_t sessio
 	qdf_list_create(&adapter->blocked_scan_request_q, WLAN_MAX_SCAN_COUNT);
 	qdf_mutex_create(&adapter->blocked_scan_request_q_lock);
 	qdf_event_create(&adapter->acs_complete_event);
+	qdf_event_create(&adapter->peer_cleanup_done);
 
 	if (QDF_STATUS_SUCCESS == status) {
 		/* Add it to the hdd's session list. */
@@ -5607,6 +5796,7 @@ static void __hdd_close_adapter(struct hdd_context *hdd_ctx,
 	qdf_mutex_destroy(&adapter->blocked_scan_request_q_lock);
 	policy_mgr_clear_concurrency_mode(hdd_ctx->psoc, adapter->device_mode);
 	qdf_event_destroy(&adapter->acs_complete_event);
+	qdf_event_destroy(&adapter->peer_cleanup_done);
 
 	hdd_cleanup_adapter(hdd_ctx, adapter, rtnl_held);
 
@@ -5721,6 +5911,28 @@ void hdd_ipa_ap_disconnect_evt(struct hdd_context *hdd_ctx,
 	}
 }
 
+static void
+hdd_peer_cleanup(struct hdd_context *hdd_ctx, struct hdd_adapter *adapter)
+{
+	QDF_STATUS qdf_status = QDF_STATUS_E_FAILURE;
+
+	/* Check if there is any peer present on the adapter */
+	if (!hdd_any_valid_peer_present(adapter))
+		return;
+
+	if (adapter->device_mode == QDF_NDI_MODE)
+		qdf_status = ucfg_nan_disable_ndi(hdd_ctx->psoc,
+						  adapter->vdev_id);
+
+	if (QDF_IS_STATUS_ERROR(qdf_status))
+		return;
+
+	qdf_status = qdf_wait_for_event_completion(&adapter->peer_cleanup_done,
+						   WLAN_WAIT_PEER_CLEANUP);
+	if (QDF_IS_STATUS_ERROR(qdf_status))
+		hdd_debug("peer_cleanup_done wait fail");
+}
+
 QDF_STATUS hdd_stop_adapter(struct hdd_context *hdd_ctx,
 			    struct hdd_adapter *adapter)
 {
@@ -5772,13 +5984,14 @@ QDF_STATUS hdd_stop_adapter(struct hdd_context *hdd_ctx,
 				reason = eSIR_MAC_DEVICE_RECOVERY;
 
 			/* For NDI do not use roam_profile */
-			if (adapter->device_mode == QDF_NDI_MODE)
+			if (adapter->device_mode == QDF_NDI_MODE) {
+				hdd_peer_cleanup(hdd_ctx, adapter);
 				status = sme_roam_disconnect(
 					mac_handle,
 					adapter->vdev_id,
 					eCSR_DISCONNECT_REASON_NDI_DELETE,
 					reason);
-			else if (roam_profile->BSSType ==
+			} else if (roam_profile->BSSType ==
 						eCSR_BSS_TYPE_START_IBSS)
 				status = sme_roam_disconnect(
 					mac_handle,
@@ -5822,8 +6035,13 @@ QDF_STATUS hdd_stop_adapter(struct hdd_context *hdd_ctx,
 			memset(wrqu.ap_addr.sa_data, '\0', ETH_ALEN);
 			wireless_send_event(adapter->dev, SIOCGIWAP, &wrqu,
 					    NULL);
-		} else if (adapter->device_mode == QDF_NAN_DISC_MODE &&
-			   ucfg_is_nan_disc_active(hdd_ctx->psoc))
+		}
+
+		if ((adapter->device_mode == QDF_NAN_DISC_MODE ||
+		     (adapter->device_mode == QDF_STA_MODE &&
+		      !ucfg_nan_is_vdev_creation_allowed(hdd_ctx->psoc))) &&
+		    ucfg_is_nan_disable_supported(hdd_ctx->psoc) &&
+		    ucfg_is_nan_disc_active(hdd_ctx->psoc))
 			ucfg_disable_nan_discovery(hdd_ctx->psoc, NULL, 0);
 
 		wlan_hdd_scan_abort(adapter);
@@ -7471,194 +7689,11 @@ static QDF_STATUS hdd_abort_sched_scan_all_adapters(struct hdd_context *hdd_ctx)
 	return QDF_STATUS_SUCCESS;
 }
 
-#ifdef WLAN_NS_OFFLOAD
-/**
- * hdd_wlan_unregister_ip6_notifier() - unregister IPv6 change notifier
- * @hdd_ctx: Pointer to hdd context
- *
- * Unregister for IPv6 address change notifications.
- *
- * Return: None
- */
-static void hdd_wlan_unregister_ip6_notifier(struct hdd_context *hdd_ctx)
-{
-	unregister_inet6addr_notifier(&hdd_ctx->ipv6_notifier);
-}
-
-/**
- * hdd_wlan_register_ip6_notifier() - register IPv6 change notifier
- * @hdd_ctx: Pointer to hdd context
- *
- * Register for IPv6 address change notifications.
- *
- * Return: 0 on success and errno on failure.
- */
-static int hdd_wlan_register_ip6_notifier(struct hdd_context *hdd_ctx)
-{
-	int ret;
-
-	hdd_ctx->ipv6_notifier.notifier_call = wlan_hdd_ipv6_changed;
-	ret = register_inet6addr_notifier(&hdd_ctx->ipv6_notifier);
-	if (ret) {
-		hdd_err("Failed to register IPv6 notifier: %d", ret);
-		goto out;
-	}
-
-	hdd_debug("Registered IPv6 notifier");
-out:
-	return ret;
-}
-#else
-/**
- * hdd_wlan_unregister_ip6_notifier() - unregister IPv6 change notifier
- * @hdd_ctx: Pointer to hdd context
- *
- * Unregister for IPv6 address change notifications.
- *
- * Return: None
- */
-static void hdd_wlan_unregister_ip6_notifier(struct hdd_context *hdd_ctx)
-{
-}
-
-/**
- * hdd_wlan_register_ip6_notifier() - register IPv6 change notifier
- * @hdd_ctx: Pointer to hdd context
- *
- * Register for IPv6 address change notifications.
- *
- * Return: None
- */
-static int hdd_wlan_register_ip6_notifier(struct hdd_context *hdd_ctx)
-{
-	return 0;
-}
-#endif
-
 void hdd_set_disconnect_status(struct hdd_adapter *adapter, bool status)
 {
 	qdf_mutex_acquire(&adapter->disconnection_status_lock);
 	adapter->disconnection_in_progress = status;
 	qdf_mutex_release(&adapter->disconnection_status_lock);
-}
-
-#ifdef FEATURE_RUNTIME_PM
-/**
- * hdd_wlan_register_pm_qos_notifier() - register PM QOS notifier
- * @hdd_ctx: Pointer to hdd context
- *
- * Register for PM QOS change notifications.
- *
- * Return: None
- */
-static int hdd_wlan_register_pm_qos_notifier(struct hdd_context *hdd_ctx)
-{
-	int ret;
-
-	/* if gRuntimePM is 1 then feature is enabled without CXPC */
-	if (hdd_ctx->config->runtime_pm != hdd_runtime_pm_dynamic) {
-		hdd_debug("Dynamic Runtime PM disabled");
-		return 0;
-	}
-
-	qdf_spinlock_create(&hdd_ctx->pm_qos_lock);
-	hdd_ctx->pm_qos_notifier.notifier_call = wlan_hdd_pm_qos_notify;
-	ret = pm_qos_add_notifier(PM_QOS_CPU_DMA_LATENCY,
-				  &hdd_ctx->pm_qos_notifier);
-	if (ret)
-		hdd_err("Failed to register PM_QOS notifier: %d", ret);
-	else
-		hdd_debug("PM QOS Notifier registered");
-
-	return ret;
-}
-
-/**
- * hdd_wlan_unregister_pm_qos_notifier() - unregister PM QOS notifier
- * @hdd_ctx: Pointer to hdd context
- *
- * Unregister for PM QOS change notifications.
- *
- * Return: None
- */
-static void hdd_wlan_unregister_pm_qos_notifier(struct hdd_context *hdd_ctx)
-{
-	int ret;
-
-	if (hdd_ctx->config->runtime_pm != hdd_runtime_pm_dynamic) {
-		hdd_debug("Dynamic Runtime PM disabled");
-		return;
-	}
-
-	ret = pm_qos_remove_notifier(PM_QOS_CPU_DMA_LATENCY,
-				     &hdd_ctx->pm_qos_notifier);
-	if (ret)
-		hdd_warn("Failed to remove qos notifier, err = %d\n", ret);
-
-	qdf_spin_lock_irqsave(&hdd_ctx->pm_qos_lock);
-
-	if (hdd_ctx->runtime_pm_prevented) {
-		pm_runtime_put_noidle(hdd_ctx->parent_dev);
-		hdd_ctx->runtime_pm_prevented = false;
-	}
-
-	qdf_spin_unlock_irqrestore(&hdd_ctx->pm_qos_lock);
-}
-#else
-static int hdd_wlan_register_pm_qos_notifier(struct hdd_context *hdd_ctx)
-{
-	return 0;
-}
-
-static void hdd_wlan_unregister_pm_qos_notifier(struct hdd_context *hdd_ctx)
-{
-}
-#endif
-
-/**
- * hdd_register_notifiers - Register netdev notifiers.
- * @hdd_ctx: HDD context
- *
- * Register netdev notifiers like IPv4 and IPv6.
- *
- * Return: 0 on success and errno on failure
- */
-static int hdd_register_notifiers(struct hdd_context *hdd_ctx)
-{
-	int ret;
-
-	ret = hdd_wlan_register_ip6_notifier(hdd_ctx);
-	if (ret)
-		goto out;
-
-	hdd_ctx->ipv4_notifier.notifier_call = wlan_hdd_ipv4_changed;
-	ret = register_inetaddr_notifier(&hdd_ctx->ipv4_notifier);
-	if (ret) {
-		hdd_err("Failed to register IPv4 notifier: %d", ret);
-		goto unregister_ip6_notifier;
-	}
-
-	ret = hdd_nud_register_netevent_notifier(hdd_ctx);
-	if (ret) {
-		hdd_err("Failed to register netevent notifier: %d",
-			ret);
-		goto unregister_inetaddr_notifier;
-	}
-
-	ret = hdd_wlan_register_pm_qos_notifier(hdd_ctx);
-	if (ret)
-		goto unregister_nud_notifier;
-
-	return 0;
-
-unregister_nud_notifier:
-	hdd_nud_unregister_netevent_notifier(hdd_ctx);
-unregister_inetaddr_notifier:
-	unregister_inetaddr_notifier(&hdd_ctx->ipv4_notifier);
-unregister_ip6_notifier:
-	hdd_wlan_unregister_ip6_notifier(hdd_ctx);
-out:
-	return ret;
 }
 
 /**
@@ -7671,7 +7706,6 @@ out:
  */
 void hdd_unregister_notifiers(struct hdd_context *hdd_ctx)
 {
-	hdd_wlan_unregister_pm_qos_notifier(hdd_ctx);
 	hdd_nud_unregister_netevent_notifier(hdd_ctx);
 	hdd_wlan_unregister_ip6_notifier(hdd_ctx);
 
@@ -7861,8 +7895,6 @@ void hdd_wlan_exit(struct hdd_context *hdd_ctx)
 	hdd_debugfs_ini_config_deinit(hdd_ctx);
 	hdd_debugfs_mws_coex_info_deinit(hdd_ctx);
 	hdd_psoc_idle_timer_stop(hdd_ctx);
-
-	hdd_unregister_notifiers(hdd_ctx);
 
 	/*
 	 * Powersave Offload Case
@@ -8221,14 +8253,44 @@ static inline void hdd_pm_qos_update_cpu_mask(cpumask_t *mask,
 		cpumask_set_cpu(6, mask);
 	}
 }
+
+/**
+ * hdd_pm_qos_update_request() - API to request for pm_qos
+ * @hdd_ctx: handle to hdd context
+ * @pm_qos_cpu_mask: cpu_mask to apply
+ *
+ * Return: none
+ */
+#ifdef FEATURE_RUNTIME_PM
 static inline void hdd_pm_qos_update_request(struct hdd_context *hdd_ctx,
-				enum pld_bus_width_type  next_vote_level,
-				cpumask_t *pm_qos_cpu_mask)
+					     enum pld_bus_width_type  next_vote_level,
+					     cpumask_t *pm_qos_cpu_mask)
 {
 	cpumask_copy(&hdd_ctx->pm_qos_req.cpus_affine, pm_qos_cpu_mask);
+
 	/* Latency value to be read from INI */
-	pm_qos_update_request(&hdd_ctx->pm_qos_req, 1);
+	if (cpumask_empty(pm_qos_cpu_mask) &&
+	    hdd_ctx->config->runtime_pm == hdd_runtime_pm_dynamic)
+		pm_qos_update_request(&hdd_ctx->pm_qos_req,
+				      PM_QOS_DEFAULT_VALUE);
+	else
+		pm_qos_update_request(&hdd_ctx->pm_qos_req, 1);
 }
+#else
+static inline void hdd_pm_qos_update_request(struct hdd_context *hdd_ctx,
+					     enum pld_bus_width_type  next_vote_level,
+					     cpumask_t *pm_qos_cpu_mask)
+{
+	cpumask_copy(&hdd_ctx->pm_qos_req.cpus_affine, pm_qos_cpu_mask);
+
+	/* Latency value to be read from INI */
+	if (cpumask_empty(pm_qos_cpu_mask))
+		pm_qos_update_request(&hdd_ctx->pm_qos_req,
+				      PM_QOS_DEFAULT_VALUE);
+	else
+		pm_qos_update_request(&hdd_ctx->pm_qos_req, 1);
+}
+#endif
 
 #ifdef CONFIG_SMP
 /**
@@ -8349,6 +8411,7 @@ static void hdd_pld_request_bus_bandwidth(struct hdd_context *hdd_ctx,
 	if (hdd_ctx->cur_vote_level != next_vote_level) {
 		hdd_debug("BW Vote level %d, tx_packets: %lld, rx_packets: %lld",
 			  next_vote_level, tx_packets, rx_packets);
+
 		hdd_ctx->cur_vote_level = next_vote_level;
 		vote_level_change = true;
 
@@ -8381,14 +8444,16 @@ static void hdd_pld_request_bus_bandwidth(struct hdd_context *hdd_ctx,
 		else
 			hdd_disable_rx_ol_for_low_tput(hdd_ctx, false);
 
-		if (hdd_ctx->is_pktlog_enabled) {
-			if (next_vote_level >= PLD_BUS_WIDTH_HIGH)
-				hdd_pktlog_enable_disable(hdd_ctx, false,
-							  0, 0);
-			else
-				hdd_pktlog_enable_disable(hdd_ctx, true,
-							  0, 0);
-		}
+		/*
+		 * force disable pktlog and only re-enable based
+		 * on ini config
+		 */
+		if (next_vote_level >= PLD_BUS_WIDTH_HIGH)
+			hdd_pktlog_enable_disable(hdd_ctx, false,
+						  0, 0);
+		else if (cds_is_packet_log_enabled())
+			hdd_pktlog_enable_disable(hdd_ctx, true,
+						  0, 0);
 	}
 
 	qdf_dp_trace_apply_tput_policy(dptrace_high_tput_req);
@@ -8706,7 +8771,11 @@ void hdd_bus_bandwidth_deinit(struct hdd_context *hdd_ctx)
 {
 	hdd_enter();
 
+	/* it is expecting the timer has been stopped or not started
+	 * when coming deinit.
+	 */
 	QDF_BUG(!qdf_periodic_work_stop_sync(&hdd_ctx->bus_bw_work));
+
 	qdf_periodic_work_destroy(&hdd_ctx->bus_bw_work);
 	hdd_pm_qos_remove_request(hdd_ctx);
 	qdf_spinlock_destroy(&hdd_ctx->bus_bw_lock);
@@ -12073,15 +12142,19 @@ int hdd_wlan_stop_modules(struct hdd_context *hdd_ctx, bool ftm_mode)
 	case DRIVER_MODULES_ENABLED:
 		hdd_debug("Wlan transitioning (CLOSED <- ENABLED)");
 
-		if (hdd_get_conparam() == QDF_GLOBAL_FTM_MODE ||
-		    hdd_get_conparam() == QDF_GLOBAL_EPPING_MODE)
+		if (hdd_get_conparam() == QDF_GLOBAL_FTM_MODE) {
+			hdd_disable_power_management(hdd_ctx);
+			break;
+		}
+
+		if (hdd_get_conparam() == QDF_GLOBAL_EPPING_MODE)
 			break;
 
 		wlan_hdd_deinit_tx_rx_histogram(hdd_ctx);
 
 		hdd_skip_acs_scan_timer_deinit(hdd_ctx);
 
-		hdd_disable_power_management();
+		hdd_disable_power_management(hdd_ctx);
 		if (hdd_deconfigure_cds(hdd_ctx)) {
 			hdd_err("Failed to de-configure CDS");
 			QDF_ASSERT(0);
@@ -12111,6 +12184,7 @@ int hdd_wlan_stop_modules(struct hdd_context *hdd_ctx, bool ftm_mode)
 			QDF_ASSERT(0);
 		}
 
+		hdd_unregister_notifiers(hdd_ctx);
 		/* De-register the SME callbacks */
 		hdd_deregister_cb(hdd_ctx);
 
@@ -12548,8 +12622,7 @@ hdd_open_adapters_for_mission_mode(struct hdd_context *hdd_ctx)
 	 * Create separate interface (wifi-aware0) for NAN. All NAN commands
 	 * should go on this new interface.
 	 */
-	if (ucfg_nan_is_vdev_creation_allowed(hdd_ctx->psoc) &&
-	    ucfg_nan_get_is_separate_nan_iface(hdd_ctx->psoc)) {
+	if (wlan_hdd_is_vdev_creation_allowed(hdd_ctx->psoc)) {
 		mac_addr = wlan_hdd_get_intf_addr(hdd_ctx, QDF_NAN_DISC_MODE);
 		status = hdd_open_adapter_no_trans(hdd_ctx, QDF_NAN_DISC_MODE,
 						   "wifi-aware%d", mac_addr);
@@ -12687,10 +12760,6 @@ int hdd_wlan_startup(struct hdd_context *hdd_ctx)
 
 	hdd_lpass_notify_wlan_version(hdd_ctx);
 
-	errno = hdd_register_notifiers(hdd_ctx);
-	if (errno)
-		goto unregister_netdev;
-
 	status = wlansap_global_init();
 	if (QDF_IS_STATUS_ERROR(status))
 		goto unregister_notifiers;
@@ -12706,9 +12775,6 @@ int hdd_wlan_startup(struct hdd_context *hdd_ctx)
 	return 0;
 
 unregister_notifiers:
-	hdd_unregister_notifiers(hdd_ctx);
-
-unregister_netdev:
 	unregister_netdevice_notifier(&hdd_netdev_notifier);
 
 unregister_wiphy:
@@ -13708,11 +13774,12 @@ static int wlan_hdd_state_ctrl_param_open(struct inode *inode,
 static void hdd_inform_wifi_off(void)
 {
 	struct hdd_context *hdd_ctx = cds_get_context(QDF_MODULE_ID_HDD);
+	int ret;
 
-	if (!hdd_ctx) {
-		hdd_err("Invalid hdd/pdev context");
+	ret = wlan_hdd_validate_context(hdd_ctx);
+	if (ret != 0)
 		return;
-	}
+
 	ucfg_blm_wifi_off(hdd_ctx->pdev);
 }
 
@@ -14649,15 +14716,51 @@ static void hdd_driver_unload(void)
 	struct osif_driver_sync *driver_sync;
 	struct hdd_context *hdd_ctx = cds_get_context(QDF_MODULE_ID_HDD);
 	QDF_STATUS status;
+	void *hif_ctx;
 
 	pr_info("%s: Unloading driver v%s\n", WLAN_MODULE_NAME,
 		QWLAN_VERSIONSTR);
 
+	/*
+	 * Wait for any trans to complete and then start the driver trans
+	 * for the unload. This will ensure that the driver trans proceeds only
+	 * after all trans have been completed. As a part of this trans, set
+	 * the driver load/unload flag to further ensure that any upcoming
+	 * trans are rejected via wlan_hdd_validate_context.
+	 */
+	status = osif_driver_sync_trans_start_wait(&driver_sync);
+	QDF_BUG(QDF_IS_STATUS_SUCCESS(status));
+	if (QDF_IS_STATUS_ERROR(status)) {
+		hdd_err("Unable to unload wlan; status:%u", status);
+		return;
+	}
+
+	hif_ctx = cds_get_context(QDF_MODULE_ID_HIF);
+	if (hif_ctx) {
+		/*
+		 * Trigger runtime sync resume before setting unload in progress
+		 * such that resume can happen successfully
+		 */
+		hif_pm_runtime_sync_resume(hif_ctx);
+	}
+
 	cds_set_driver_loaded(false);
 	cds_set_unload_in_progress(true);
 
-	if (hdd_ctx)
+	if (hdd_ctx) {
 		hdd_psoc_idle_timer_stop(hdd_ctx);
+		/*
+		 * Runtime PM sync resume may have started the bus bandwidth
+		 * periodic work hence stop it.
+		 */
+		hdd_bus_bw_compute_timer_stop(hdd_ctx);
+	}
+
+	/*
+	 * Stop the trans before calling unregister_driver as that involves a
+	 * call to pld_remove which in itself is a psoc transaction
+	 */
+	osif_driver_sync_trans_stop(driver_sync);
 
 	/* trigger SoC remove */
 	wlan_hdd_unregister_driver();

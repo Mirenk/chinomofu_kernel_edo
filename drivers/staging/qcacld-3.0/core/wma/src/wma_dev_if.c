@@ -1288,8 +1288,8 @@ static void wma_handle_hidden_ssid_restart(tp_wma_handle wma,
 				      hidden_ssid_restart);
 }
 
-static void wma_sap_peer_send_phymode(struct wlan_objmgr_vdev *vdev,
-				      void *object, void *arg)
+static void wma_peer_send_phymode(struct wlan_objmgr_vdev *vdev,
+				  void *object, void *arg)
 {
 	struct wlan_objmgr_peer *peer = object;
 	enum wlan_phymode old_peer_phymode;
@@ -1343,16 +1343,16 @@ static void wma_sap_peer_send_phymode(struct wlan_objmgr_vdev *vdev,
 	wma_set_peer_param(wma, peer_mac_addr, WMI_PEER_CHWIDTH,
 			   max_ch_width_supported, vdev_id);
 
-	wma_debug("old phymode %d new phymode %d bw %d macaddr "QDF_MAC_ADDR_STR,
-		  old_peer_phymode, new_phymode, max_ch_width_supported,
+	wma_debug("FW phymode %d old phymode %d new phymode %d bw %d macaddr "QDF_MAC_ADDR_STR,
+		  fw_phymode, old_peer_phymode, new_phymode, max_ch_width_supported,
 		  QDF_MAC_ADDR_ARRAY(peer_mac_addr));
 }
 
 static void
-wma_update_peer_phymode_sap(struct wlan_objmgr_vdev *vdev)
+wma_update_peer_phymode(struct wlan_objmgr_vdev *vdev)
 {
 	wlan_objmgr_iterate_peerobj_list(vdev,
-					 wma_sap_peer_send_phymode,
+					 wma_peer_send_phymode,
 					 NULL,
 					 WLAN_LEGACY_WMA_ID);
 }
@@ -1407,29 +1407,16 @@ wma_handle_channel_switch_resp(tp_wma_handle wma,
 	if (QDF_IS_STATUS_SUCCESS(resp_event->status) &&
 	    iface->type == WMI_VDEV_TYPE_AP &&
 	    resp_event->resp_type == WMI_VDEV_RESTART_RESP_EVENT)
-		wma_update_peer_phymode_sap(iface->vdev);
+		wma_update_peer_phymode(iface->vdev);
 
 	if ((QDF_IS_STATUS_SUCCESS(resp_event->status) &&
 	     (resp_event->resp_type == WMI_VDEV_RESTART_RESP_EVENT) &&
 	     ((iface->type == WMI_VDEV_TYPE_STA) ||
 	      (iface->type == WMI_VDEV_TYPE_MONITOR))) ||
 	    ((resp_event->resp_type == WMI_VDEV_START_RESP_EVENT) &&
-	     (iface->type == WMI_VDEV_TYPE_MONITOR))) {
-		wmi_host_channel_width chanwidth;
-		int err;
+	     (iface->type == WMI_VDEV_TYPE_MONITOR)))
+		wma_update_peer_phymode(iface->vdev);
 
-		/* for CSA case firmware expects phymode before ch_wd */
-		err = wma_set_peer_param(wma, iface->bssid,
-					 WMI_PEER_PHYMODE, iface->chanmode,
-					resp_event->vdev_id);
-		chanwidth = wmi_get_ch_width_from_phy_mode(wma->wmi_handle,
-							   iface->chanmode);
-		err = wma_set_peer_param(wma, iface->bssid, WMI_PEER_CHWIDTH,
-					 chanwidth, resp_event->vdev_id);
-		wma_debug("vdev_id %d chanwidth %d chanmode %d",
-			  resp_event->vdev_id, chanwidth,
-			  iface->chanmode);
-	}
 
 	if (wma_is_vdev_in_ap_mode(wma, resp_event->vdev_id) ||
 	    mlme_is_chan_switch_in_progress(iface->vdev))
@@ -1798,6 +1785,24 @@ QDF_STATUS wma_peer_unmap_conf_cb(uint8_t vdev_id,
 	return qdf_status;
 }
 
+static bool wma_objmgr_peer_exist(tp_wma_handle wma, uint8_t vdev_id,
+				  uint8_t *peer_addr, uint8_t *peer_vdev_id)
+{
+	struct wlan_objmgr_peer *peer;
+
+	peer = wlan_objmgr_get_peer_by_mac(wma->psoc, peer_addr,
+					   WLAN_LEGACY_WMA_ID);
+	if (!peer)
+		return false;
+
+	if (peer_vdev_id)
+		*peer_vdev_id = wlan_vdev_get_id(wlan_peer_get_vdev(peer));
+
+	wlan_objmgr_peer_release_ref(peer, WLAN_LEGACY_WMA_ID);
+
+	return true;
+}
+
 /**
  * wma_remove_peer() - remove peer information from host driver and fw
  * @wma: wma handle
@@ -1824,6 +1829,7 @@ QDF_STATUS wma_remove_peer(tp_wma_handle wma, uint8_t *bssid,
 	QDF_STATUS qdf_status = QDF_STATUS_SUCCESS;
 	uint32_t bitmap = 1 << CDP_PEER_DELETE_NO_SPECIAL;
 	bool peer_unmap_conf_support_enabled;
+	uint8_t peer_vdev_id;
 
 	if (!wma->interfaces[vdev_id].peer_count) {
 		WMA_LOGE("%s: Can't remove peer with peer_addr %pM vdevid %d peer_count %d",
@@ -1842,6 +1848,20 @@ QDF_STATUS wma_remove_peer(tp_wma_handle wma, uint8_t *bssid,
 	if (!peer) {
 		WMA_LOGE("%s: PEER is NULL for vdev_id: %d", __func__, vdev_id);
 		QDF_BUG(0);
+		return QDF_STATUS_E_INVAL;
+	}
+
+	if (!wma_objmgr_peer_exist(wma, vdev_id, peer_addr, &peer_vdev_id)) {
+		wma_err("peer doesn't exist peer_addr %pM vdevid %d peer_count %d",
+			 peer_addr, vdev_id,
+			 wma->interfaces[vdev_id].peer_count);
+		return QDF_STATUS_E_INVAL;
+	}
+
+	if (peer_vdev_id != vdev_id) {
+		wma_err("peer %pM is on vdev id %d but delete req on vdevid %d peer_count %d",
+			 peer_addr, peer_vdev_id, vdev_id,
+			 wma->interfaces[vdev_id].peer_count);
 		return QDF_STATUS_E_INVAL;
 	}
 	peer_unmap_conf_support_enabled =
@@ -3563,8 +3583,7 @@ int wma_peer_assoc_conf_handler(void *handle, uint8_t *cmd_param_info,
 			goto free_req_msg;
 		}
 
-		/* peer assoc conf event means the cmd succeeds */
-		params->status = QDF_STATUS_SUCCESS;
+		params->status = event->status;
 		WMA_LOGD(FL("Send ADD_STA_RSP: statype %d vdev_id %d aid %d bssid %pM staIdx %d status %d"),
 			 params->staType, params->smesessionId,
 			 params->assocId, params->bssId, params->staIdx,
@@ -3581,8 +3600,7 @@ int wma_peer_assoc_conf_handler(void *handle, uint8_t *cmd_param_info,
 			goto free_req_msg;
 		}
 
-		/* peer assoc conf event means the cmd succeeds */
-		params->status = QDF_STATUS_SUCCESS;
+		params->status = event->status;
 		WMA_LOGD(FL("Send ADD BSS RSP: opermode: %d update_bss: %d nw_type: %d bssid: %pM staIdx %d status %d"),
 			params->operMode,
 			params->updateBss, params->nwType, params->bssId,

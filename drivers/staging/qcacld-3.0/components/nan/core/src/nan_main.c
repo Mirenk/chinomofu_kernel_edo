@@ -87,8 +87,8 @@ QDF_STATUS nan_set_discovery_state(struct wlan_objmgr_psoc *psoc,
 
 	qdf_spin_unlock_bh(&psoc_priv->lock);
 
-	nan_info("NAN State transitioned from %d -> %d", cur_state,
-		 psoc_priv->disc_state);
+	nan_debug("NAN State transitioned from %d -> %d", cur_state,
+		  psoc_priv->disc_state);
 
 	return status;
 }
@@ -341,22 +341,20 @@ nan_increment_ndp_sessions(struct wlan_objmgr_psoc *psoc,
 		wlan_objmgr_peer_release_ref(peer, WLAN_NAN_ID);
 		return QDF_STATUS_E_NULL_VALUE;
 	}
-
 	qdf_spin_lock_bh(&peer_nan_obj->lock);
-	if (peer_nan_obj->active_ndp_sessions == MAX_NDP_INSTANCES_PER_PEER) {
-		qdf_spin_unlock_bh(&peer_nan_obj->lock);
-		nan_err("Already reached Max limit(%d) for NDP's per peer!",
-			MAX_NDP_INSTANCES_PER_PEER);
-		wlan_objmgr_peer_release_ref(peer, WLAN_NAN_ID);
-		return QDF_STATUS_E_FAILURE;
-	}
+
 	/*
 	 * Store the first channel info in NDP Confirm as the home channel info
 	 * and store it in the peer private object.
 	 */
-	qdf_mem_copy(&peer_nan_obj->home_chan_info, ndp_chan_info,
-		     sizeof(struct nan_datapath_channel_info));
+	if (!peer_nan_obj->active_ndp_sessions)
+		qdf_mem_copy(&peer_nan_obj->home_chan_info, ndp_chan_info,
+			     sizeof(struct nan_datapath_channel_info));
+
 	peer_nan_obj->active_ndp_sessions++;
+	nan_debug("Number of active session = %d for peer:"QDF_MAC_ADDR_STR"",
+		  peer_nan_obj->active_ndp_sessions,
+		  QDF_MAC_ADDR_ARRAY(peer_ndi_mac->bytes));
 	qdf_spin_unlock_bh(&peer_nan_obj->lock);
 	wlan_objmgr_peer_release_ref(peer, WLAN_NAN_ID);
 
@@ -393,6 +391,9 @@ static QDF_STATUS nan_decrement_ndp_sessions(struct wlan_objmgr_psoc *psoc,
 		return QDF_STATUS_E_FAILURE;
 	}
 	peer_nan_obj->active_ndp_sessions--;
+	nan_debug("Number of active session = %d for peer:"QDF_MAC_ADDR_STR"",
+		  peer_nan_obj->active_ndp_sessions,
+		  QDF_MAC_ADDR_ARRAY(peer_ndi_mac->bytes));
 	qdf_spin_unlock_bh(&peer_nan_obj->lock);
 	wlan_objmgr_peer_release_ref(peer, WLAN_NAN_ID);
 
@@ -888,14 +889,17 @@ done:
 	return QDF_STATUS_SUCCESS;
 }
 
-static QDF_STATUS nan_handle_disable_ind(struct nan_event_params *nan_event)
+QDF_STATUS nan_disable_cleanup(struct wlan_objmgr_psoc *psoc)
 {
 	struct nan_psoc_priv_obj *psoc_nan_obj;
-	struct wlan_objmgr_psoc *psoc;
 	QDF_STATUS status;
 	uint8_t vdev_id;
 
-	psoc = nan_event->psoc;
+	if (!psoc) {
+		nan_err("psoc is NULL");
+		return QDF_STATUS_E_NULL_VALUE;
+	}
+
 	psoc_nan_obj = nan_get_psoc_priv_obj(psoc);
 	if (!psoc_nan_obj) {
 		nan_err("psoc_nan_obj is NULL");
@@ -925,6 +929,11 @@ static QDF_STATUS nan_handle_disable_ind(struct nan_event_params *nan_event)
 	return status;
 }
 
+static QDF_STATUS nan_handle_disable_ind(struct nan_event_params *nan_event)
+{
+	return nan_disable_cleanup(nan_event->psoc);
+}
+
 static QDF_STATUS nan_handle_schedule_update(
 				struct nan_datapath_sch_update_event *ind)
 {
@@ -951,16 +960,19 @@ static QDF_STATUS nan_handle_schedule_update(
 }
 
 /**
- * nan_handle_host_update: Updates Host about NAN Datapath status, called by
- * NAN modules's Datapath event handler.
+ * nan_handle_host_update() - Updates Host about NAN Datapath status
+ * @evt: Event data received from firmware
+ * @vdev: pointer to vdev
  *
  * Return: status of operation
  */
-static QDF_STATUS nan_handle_host_update(struct nan_datapath_host_event *evt)
+static QDF_STATUS nan_handle_host_update(struct nan_datapath_host_event *evt,
+					 struct wlan_objmgr_vdev **vdev)
 {
 	struct wlan_objmgr_psoc *psoc;
 	struct nan_psoc_priv_obj *psoc_nan_obj;
 
+	*vdev = evt->vdev;
 	psoc = wlan_vdev_get_psoc(evt->vdev);
 	if (!psoc) {
 		nan_err("psoc is NULL");
@@ -1068,7 +1080,9 @@ QDF_STATUS nan_datapath_event_handler(struct scheduler_msg *pe_msg)
 		nan_handle_schedule_update(pe_msg->bodyptr);
 		break;
 	case NDP_HOST_UPDATE:
-		nan_handle_host_update(pe_msg->bodyptr);
+		nan_handle_host_update(pe_msg->bodyptr, &cmd.vdev);
+		cmd.cmd_type = WLAN_SER_CMD_NDP_END_ALL_REQ;
+		wlan_serialization_remove_cmd(&cmd);
 		break;
 	default:
 		nan_alert("Unhandled NDP event: %d", pe_msg->type);

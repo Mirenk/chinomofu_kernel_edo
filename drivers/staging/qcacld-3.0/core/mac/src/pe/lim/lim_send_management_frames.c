@@ -201,7 +201,7 @@ lim_send_probe_req_mgmt_frame(struct mac_context *mac_ctx,
 	 * if gEnableVhtFor24GHzBand is false and dot11mode is 11ac
 	 * set it to 11n.
 	 */
-	if (channel <= SIR_11B_CHANNEL_END &&
+	if (wlan_reg_is_24ghz_ch(channel) &&
 	    !mac_ctx->mlme_cfg->vht_caps.vht_cap_info.b24ghz_band &&
 	    (MLME_DOT11_MODE_11AC == dot11mode ||
 	     MLME_DOT11_MODE_11AC_ONLY == dot11mode))
@@ -268,7 +268,6 @@ lim_send_probe_req_mgmt_frame(struct mac_context *mac_ctx,
 
 
 	if (pesession) {
-		pesession->htCapability = IS_DOT11_MODE_HT(dot11mode);
 		/* Include HT Capability IE */
 		if (pesession->htCapability)
 			populate_dot11f_ht_caps(mac_ctx, pesession, &pr.HTCaps);
@@ -293,7 +292,6 @@ lim_send_probe_req_mgmt_frame(struct mac_context *mac_ctx,
 		}
 	}
 	if (pesession) {
-		pesession->vhtCapability = IS_DOT11_MODE_VHT(dot11mode);
 		/* Include VHT Capability IE */
 		if (pesession->vhtCapability) {
 			populate_dot11f_vht_caps(mac_ctx, pesession,
@@ -1160,7 +1158,7 @@ static QDF_STATUS lim_assoc_rsp_tx_complete(
 	lim_fill_sme_assoc_ind_params(
 				mac_ctx, lim_assoc_ind,
 				sme_assoc_ind,
-				session_entry);
+				session_entry, true);
 
 	qdf_mem_zero(&msg, sizeof(struct scheduler_msg));
 	msg.type = eWNI_SME_ASSOC_IND_UPPER_LAYER;
@@ -1169,8 +1167,8 @@ static QDF_STATUS lim_assoc_rsp_tx_complete(
 	sme_assoc_ind->staId = sta_ds->staIndex;
 	sme_assoc_ind->reassocReq = sta_ds->mlmStaContext.subType;
 	sme_assoc_ind->timingMeasCap = sta_ds->timingMeasCap;
-
-	mac_ctx->lim.sme_msg_callback(mac_ctx, &msg);
+	MTRACE(mac_trace_msg_tx(mac_ctx, session_entry->peSessionId, msg.type));
+	lim_sys_process_mmh_msg_api(mac_ctx, &msg);
 
 	qdf_mem_free(lim_assoc_ind);
 
@@ -2031,9 +2029,8 @@ lim_send_assoc_req_mgmt_frame(struct mac_context *mac_ctx,
 		pe_debug("Populate VHT IEs in Assoc Request");
 		populate_dot11f_vht_caps(mac_ctx, pe_session, &frm->VHTCaps);
 		vht_enabled = true;
-		if (pe_session->enableHtSmps &&
-				!pe_session->supported_nss_1x1) {
-			pe_err("VHT OP mode IE in Assoc Req");
+		if (pe_session->gLimOperatingMode.present) {
+			pe_debug("VHT OP mode IE in Assoc Req");
 			populate_dot11f_operating_mode(mac_ctx,
 					&frm->OperatingMode, pe_session);
 		}
@@ -5273,28 +5270,29 @@ error_delba:
 	return qdf_status;
 }
 
+#define WLAN_SAE_AUTH_TIMEOUT 1000
+#define WLAN_SAE_AUTH_RETRY 1
+
 /**
  * lim_tx_mgmt_frame() - Transmits Auth mgmt frame
  * @mac_ctx Pointer to Global MAC structure
- * @mb_msg: Received message info
+ * @sme_session_id: vdev id
  * @msg_len: Received message length
  * @packet: Packet to be transmitted
  * @frame: Received frame
  *
  * Return: None
  */
-static void lim_tx_mgmt_frame(struct mac_context *mac_ctx,
-	struct sir_mgmt_msg *mb_msg, uint32_t msg_len,
-	void *packet, uint8_t *frame)
+static void
+lim_tx_mgmt_frame(struct mac_context *mac_ctx, uint8_t sme_session_id,
+		  uint32_t msg_len, void *packet, uint8_t *frame)
 {
-	tpSirMacFrameCtl fc = (tpSirMacFrameCtl) mb_msg->data;
+	tpSirMacFrameCtl fc = (tpSirMacFrameCtl)frame;
 	QDF_STATUS qdf_status;
-	uint8_t sme_session_id = 0;
 	struct pe_session *session;
 	uint16_t auth_ack_status;
 	enum rateid min_rid = RATEID_DEFAULT;
 
-	sme_session_id = mb_msg->session_id;
 	session = pe_find_session_by_sme_session_id(mac_ctx, sme_session_id);
 	if (!session) {
 		cds_packet_free((void *)packet);
@@ -5328,35 +5326,101 @@ static void lim_tx_mgmt_frame(struct mac_context *mac_ctx,
 	}
 }
 
-void lim_send_mgmt_frame_tx(struct mac_context *mac_ctx,
-		struct scheduler_msg *msg)
+static void
+lim_handle_sae_auth_retry(struct mac_context *mac_ctx, uint8_t vdev_id,
+			  uint8_t *frame, uint32_t frame_len)
 {
-	struct sir_mgmt_msg *mb_msg = (struct sir_mgmt_msg *)msg->bodyptr;
-	uint32_t msg_len;
-	tpSirMacFrameCtl fc = (tpSirMacFrameCtl) mb_msg->data;
-	uint8_t sme_session_id;
+	struct pe_session *session;
+	struct sae_auth_retry *sae_retry;
+
+	session = pe_find_session_by_sme_session_id(mac_ctx, vdev_id);
+	if (!session) {
+		pe_err("session not found for given vdev_id %d",
+		       vdev_id);
+		return;
+	}
+
+	sae_retry = mlme_get_sae_auth_retry(session->vdev);
+	if (!sae_retry) {
+		pe_err("sae retry pointer is NULL for vdev_id %d",
+		       vdev_id);
+		return;
+	}
+
+	if (sae_retry->sae_auth.data)
+		lim_sae_auth_cleanup_retry(mac_ctx, vdev_id);
+
+	sae_retry->sae_auth.data = qdf_mem_malloc(frame_len);
+	if (!sae_retry->sae_auth.data) {
+		pe_err("failed to alloc memory for sae auth");
+		return;
+	}
+
+	pe_debug("SAE auth frame queued vdev_id %d seq_num %d",
+		 vdev_id, mac_ctx->mgmtSeqNum);
+	qdf_mem_copy(sae_retry->sae_auth.data, frame, frame_len);
+	mac_ctx->lim.limTimers.g_lim_periodic_auth_retry_timer.sessionId =
+					session->peSessionId;
+	sae_retry->sae_auth.len = frame_len;
+	sae_retry->sae_auth_max_retry = WLAN_SAE_AUTH_RETRY;
+
+	tx_timer_change(
+		&mac_ctx->lim.limTimers.g_lim_periodic_auth_retry_timer,
+		SYS_MS_TO_TICKS(WLAN_SAE_AUTH_TIMEOUT), 0);
+	/* Activate Auth Retry timer */
+	if (tx_timer_activate(
+	    &mac_ctx->lim.limTimers.g_lim_periodic_auth_retry_timer) !=
+	    TX_SUCCESS) {
+		pe_err("failed to start periodic auth retry timer");
+		lim_sae_auth_cleanup_retry(mac_ctx, vdev_id);
+	}
+}
+
+void lim_send_frame(struct mac_context *mac_ctx, uint8_t sme_session_id,
+		    uint8_t *buf, uint16_t buf_len)
+{
 	QDF_STATUS qdf_status;
 	uint8_t *frame;
 	void *packet;
-	tpSirMacMgmtHdr mac_hdr;
 
-	msg_len = mb_msg->msg_len - sizeof(*mb_msg);
+	tpSirMacFrameCtl fc = (tpSirMacFrameCtl)buf;
+	tpSirMacMgmtHdr mac_hdr = (tpSirMacMgmtHdr)buf;
+
 	pe_debug("sending fc->type: %d fc->subType: %d",
-		fc->type, fc->subType);
-
-	sme_session_id = mb_msg->session_id;
-	mac_hdr = (tpSirMacMgmtHdr)mb_msg->data;
+		 fc->type, fc->subType);
 
 	lim_add_mgmt_seq_num(mac_ctx, mac_hdr);
 
-	qdf_status = cds_packet_alloc((uint16_t) msg_len, (void **)&frame,
+	qdf_status = cds_packet_alloc(buf_len, (void **)&frame,
 				 (void **)&packet);
 	if (!QDF_IS_STATUS_SUCCESS(qdf_status)) {
 		pe_err("call to bufAlloc failed for AUTH frame");
 		return;
 	}
 
-	qdf_mem_copy(frame, mb_msg->data, msg_len);
+	qdf_mem_copy(frame, buf, buf_len);
+	lim_tx_mgmt_frame(mac_ctx, sme_session_id, buf_len, packet, frame);
+}
 
-	lim_tx_mgmt_frame(mac_ctx, mb_msg, msg_len, packet, frame);
+void lim_send_mgmt_frame_tx(struct mac_context *mac_ctx,
+			    struct scheduler_msg *msg)
+{
+	struct sir_mgmt_msg *mb_msg = (struct sir_mgmt_msg *)msg->bodyptr;
+	uint32_t msg_len;
+	tpSirMacFrameCtl fc = (tpSirMacFrameCtl)mb_msg->data;
+	uint8_t vdev_id;
+	uint16_t auth_algo;
+
+	msg_len = mb_msg->msg_len - sizeof(*mb_msg);
+	vdev_id = mb_msg->session_id;
+
+	if (fc->subType == SIR_MAC_MGMT_AUTH) {
+		auth_algo = *(uint16_t *)(mb_msg->data +
+					sizeof(tSirMacMgmtHdr));
+		if (auth_algo == eSIR_AUTH_TYPE_SAE)
+			lim_handle_sae_auth_retry(mac_ctx, vdev_id,
+						  mb_msg->data, msg_len);
+	}
+
+	lim_send_frame(mac_ctx, vdev_id, mb_msg->data, msg_len);
 }

@@ -590,7 +590,8 @@ void hdd_enable_host_offloads(struct hdd_adapter *adapter,
 	hdd_enable_arp_offload(adapter, trigger);
 	hdd_enable_ns_offload(adapter, trigger);
 	hdd_enable_mc_addr_filtering(adapter, trigger);
-	hdd_enable_hw_filter(adapter);
+	if (adapter->device_mode != QDF_NDI_MODE)
+		hdd_enable_hw_filter(adapter);
 	hdd_enable_action_frame_patterns(adapter);
 out:
 	hdd_exit();
@@ -894,23 +895,30 @@ int wlan_hdd_pm_qos_notify(struct notifier_block *nb, unsigned long curr_val,
 {
 	struct hdd_context *hdd_ctx = container_of(nb, struct hdd_context,
 						   pm_qos_notifier);
-	void *hif_ctx = cds_get_context(QDF_MODULE_ID_HIF);
+	void *hif_ctx;
 
+	if (hdd_ctx->driver_status != DRIVER_MODULES_ENABLED) {
+		hdd_debug_rl("Driver Module closed; skipping pm qos notify");
+		return 0;
+	}
+
+	hif_ctx = cds_get_context(QDF_MODULE_ID_HIF);
 	if (!hif_ctx) {
 		hdd_err("Hif context is Null");
 		return -EINVAL;
 	}
 
-	hdd_debug("PM QOS update. Current value: %ld", curr_val);
+	hdd_debug("PM QOS update: runtime_pm_prevented %d Current value: %ld",
+		  hdd_ctx->runtime_pm_prevented, curr_val);
 	qdf_spin_lock_irqsave(&hdd_ctx->pm_qos_lock);
 
 	if (!hdd_ctx->runtime_pm_prevented &&
 	    curr_val != PM_QOS_CPU_DMA_LAT_DEFAULT_VALUE) {
-		hif_pm_runtime_get_noresume(hif_ctx);
+		hif_pm_runtime_get_noresume(hif_ctx, RTPM_ID_QOS_NOTIFY);
 		hdd_ctx->runtime_pm_prevented = true;
 	} else if (hdd_ctx->runtime_pm_prevented &&
 		   curr_val == PM_QOS_CPU_DMA_LAT_DEFAULT_VALUE) {
-		hif_pm_runtime_put_noidle(hif_ctx);
+		hif_pm_runtime_put(hif_ctx, RTPM_ID_QOS_NOTIFY);
 		hdd_ctx->runtime_pm_prevented = false;
 	}
 
@@ -1675,8 +1683,6 @@ static int __wlan_hdd_cfg80211_resume_wlan(struct wiphy *wiphy)
 		goto exit_with_code;
 	}
 
-	pld_request_bus_bandwidth(hdd_ctx->parent_dev, PLD_BUS_WIDTH_MEDIUM);
-
 	status = hdd_resume_wlan();
 	if (status != QDF_STATUS_SUCCESS) {
 		exit_code = 0;
@@ -1732,7 +1738,7 @@ static int _wlan_hdd_cfg80211_resume_wlan(struct wiphy *wiphy)
 
 	hif_ctx = cds_get_context(QDF_MODULE_ID_HIF);
 	errno = __wlan_hdd_cfg80211_resume_wlan(wiphy);
-	hif_pm_runtime_put(hif_ctx);
+	hif_pm_runtime_put(hif_ctx, RTPM_ID_SUSPEND_RESUME);
 
 	return errno;
 }
@@ -1918,8 +1924,6 @@ static int __wlan_hdd_cfg80211_suspend_wlan(struct wiphy *wiphy,
 
 	hdd_ctx->is_wiphy_suspended = true;
 
-	pld_request_bus_bandwidth(hdd_ctx->parent_dev, PLD_BUS_WIDTH_NONE);
-
 	hdd_exit();
 	return 0;
 
@@ -1955,13 +1959,13 @@ static int _wlan_hdd_cfg80211_suspend_wlan(struct wiphy *wiphy,
 	}
 
 	hif_ctx = cds_get_context(QDF_MODULE_ID_HIF);
-	errno = hif_pm_runtime_get_sync(hif_ctx);
+	errno = hif_pm_runtime_get_sync(hif_ctx, RTPM_ID_SUSPEND_RESUME);
 	if (errno)
 		return errno;
 
 	errno = __wlan_hdd_cfg80211_suspend_wlan(wiphy, wow);
 	if (errno) {
-		hif_pm_runtime_put(hif_ctx);
+		hif_pm_runtime_put(hif_ctx, RTPM_ID_SUSPEND_RESUME);
 		return errno;
 	}
 
