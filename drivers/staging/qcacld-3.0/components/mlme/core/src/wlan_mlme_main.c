@@ -277,6 +277,8 @@ static void mlme_init_generic_cfg(struct wlan_objmgr_psoc *psoc,
 		cfg_get(psoc, CFG_ENABLE_RTT_MAC_RANDOMIZATION);
 	gen->band_capability =
 		cfg_get(psoc, CFG_BAND_CAPABILITY);
+	if (!gen->band_capability)
+		gen->band_capability = (BIT(REG_BAND_2G) | BIT(REG_BAND_5G));
 	gen->band = gen->band_capability;
 	gen->select_5ghz_margin =
 		cfg_get(psoc, CFG_SELECT_5GHZ_MARGIN);
@@ -1602,6 +1604,12 @@ static void mlme_init_lfr_cfg(struct wlan_objmgr_psoc *psoc,
 		cfg_get(psoc, CFG_LFR_ROAM_BG_SCAN_CLIENT_BITMAP);
 	lfr->roam_bg_scan_bad_rssi_offset_2g =
 		cfg_get(psoc, CFG_LFR_ROAM_BG_SCAN_BAD_RSSI_OFFSET_2G);
+	lfr->roam_data_rssi_threshold_triggers =
+		cfg_get(psoc, CFG_ROAM_DATA_RSSI_THRESHOLD_TRIGGERS);
+	lfr->roam_data_rssi_threshold =
+		cfg_get(psoc, CFG_ROAM_DATA_RSSI_THRESHOLD);
+	lfr->rx_data_inactivity_time =
+		cfg_get(psoc, CFG_RX_DATA_INACTIVITY_TIME);
 	lfr->adaptive_roamscan_dwell_mode =
 		cfg_get(psoc, CFG_LFR_ADAPTIVE_ROAMSCAN_DWELL_MODE);
 	lfr->per_roam_enable =
