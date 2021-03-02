@@ -51,6 +51,7 @@ static const char * const clocks[] = {
 	"gmu_clk",
 	"ahb_clk",
 	"smmu_vote",
+	"apb_pclk",
 };
 
 static unsigned long ib_votes[KGSL_MAX_BUSLEVELS];
@@ -669,11 +670,11 @@ void kgsl_pwrctrl_pwrlevel_change(struct kgsl_device *device,
 	if (pwr->gpu_bimc_int_clk) {
 		if (pwr->active_pwrlevel == 0 &&
 				!pwr->gpu_bimc_interface_enabled) {
-			kgsl_pwrctrl_clk_set_rate(pwr->gpu_bimc_int_clk,
-					pwr->gpu_bimc_int_clk_freq,
-					"bimc_gpu_clk");
 			_bimc_clk_prepare_enable(device,
 					pwr->gpu_bimc_int_clk,
+					"bimc_gpu_clk");
+			kgsl_pwrctrl_clk_set_rate(pwr->gpu_bimc_int_clk,
+					pwr->gpu_bimc_int_clk_freq,
 					"bimc_gpu_clk");
 			pwr->gpu_bimc_interface_enabled = true;
 		} else if (pwr->previous_pwrlevel == 0
