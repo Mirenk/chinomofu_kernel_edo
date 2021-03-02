@@ -631,6 +631,20 @@ config SENSORS_TCS3490
           ALS and color light sensors.
           This driver can also be build as module.
 
+config SONY_CAMERA
+        tristate "Sony camera"
+        default n
+
+config SONY_CAMERA_SYNC
+        tristate "Sony camera sync"
+		depends on SONY_CAMERA
+        default n
+
+config SONY_CAMERA_FLASH
+        tristate "Sony camera flash LED"
+		depends on SONY_CAMERA
+        default n
+
 source "drivers/misc/c2port/Kconfig"
 source "drivers/misc/eeprom/Kconfig"
 source "drivers/misc/cb710/Kconfig"

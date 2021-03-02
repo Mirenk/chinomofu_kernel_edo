@@ -65,6 +65,9 @@ obj-$(CONFIG_UID_SYS_STATS)	+= uid_sys_stats.o
 obj-$(CONFIG_MEMORY_STATE_TIME)	+= memory_state_time.o
 obj-$(CONFIG_QPNP_MISC)		+= qpnp-misc.o
 obj-$(CONFIG_SENSORS_TCS3490)	+= tcs3490.o
+obj-$(CONFIG_SONY_CAMERA)       += sony_camera/
+obj-$(CONFIG_SONY_CAMERA_SYNC)       += camera_sync/
+obj-$(CONFIG_SONY_CAMERA_FLASH)       += flash_led/
 
 obj-$(CONFIG_OKL4_USER_VIRQ)	+= okl4-virq.o
 obj-$(CONFIG_OKL4_RINGBUF)	+= okl4-ringbuf.o
